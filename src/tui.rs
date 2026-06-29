@@ -148,14 +148,14 @@ pub fn draw_pending(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(3),
             Constraint::Length(3),
         ])
         .split(area);
     let first = pending
         .get(selected)
-        .map(|p| p.description.clone())
+        .map(format_selected_pending)
         .unwrap_or_else(|| "no pending requests".to_string());
     frame.render_widget(
         Paragraph::new(first).block(Block::default().title("Operation").borders(Borders::ALL)),
@@ -165,7 +165,7 @@ pub fn draw_pending(
         .iter()
         .enumerate()
         .map(|(idx, p)| {
-            let line = Line::from(format!("{} {}", p.id, p.description));
+            let line = Line::from(format!("id={} {}", p.id, p.description));
             let item = ListItem::new(line);
             if idx == selected {
                 item.style(Style::default().add_modifier(Modifier::REVERSED))
@@ -185,6 +185,15 @@ pub fn draw_pending(
         .block(Block::default().borders(Borders::ALL)),
         chunks[2],
     );
+}
+
+fn format_selected_pending(pending: &crate::state::PendingMetadataRequest) -> String {
+    format!(
+        "id={}\npath={}\n{}",
+        pending.id,
+        pending.operation.path(),
+        pending.description
+    )
 }
 
 pub fn edit_pending_command(name: &str, id: u64, current_command: &str) -> Result<String> {

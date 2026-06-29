@@ -12,16 +12,17 @@ use tempfile::TempDir;
 
 use common::RunningSession;
 
-fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
     let area = *buffer.area();
-    let mut out = String::new();
+    let mut lines = Vec::new();
     for y in area.y..area.y + area.height {
+        let mut line = String::new();
         for x in area.x..area.x + area.width {
-            out.push_str(buffer[(x, y)].symbol());
+            line.push_str(buffer[(x, y)].symbol());
         }
-        out.push('\n');
+        lines.push(line);
     }
-    out
+    lines
 }
 
 #[test]
@@ -44,9 +45,12 @@ fn tui_renders_pending_request_and_controls() {
     terminal
         .draw(|frame| sandboxfs::tui::draw_pending(frame, &pending, 0, "ok"))
         .unwrap();
-    let rendered = buffer_text(terminal.backend().buffer());
-    assert!(rendered.contains("Operation"));
-    assert!(rendered.contains("42 path=/data/file SETATTR mode=0444"));
+    let lines = buffer_lines(terminal.backend().buffer());
+    assert!(lines[0].contains("Operation"));
+    assert!(lines[1].contains("id=42"));
+    assert!(lines[2].contains("path=/data/file"));
+    assert!(lines[3].contains("path=/data/file SETATTR mode=0444"));
+    let rendered = lines.join("\n");
     assert!(rendered.contains("a=allow d=deny n=do-nothing e=edit q=quit ok"));
 }
 
