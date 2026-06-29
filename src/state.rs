@@ -81,7 +81,7 @@ impl MetadataOperation {
     pub fn description(&self) -> String {
         match self {
             Self::Chmod { path, mode } => format!("chmod {:o} {}", mode, path),
-            Self::Chown { path, uid, gid } => format!("chown uid={:?} gid={:?} {}", uid, gid, path),
+            Self::Chown { path, uid, gid } => format_chown_description(path, *uid, *gid),
             Self::Chattr { path, flags } => format!("chattr flags=0x{flags:x} {path}"),
             Self::SetAttr {
                 path,
@@ -89,10 +89,28 @@ impl MetadataOperation {
                 uid,
                 gid,
                 flags,
-            } => {
-                format!("setattr mode={mode:?} uid={uid:?} gid={gid:?} flags={flags:?} {path}")
-            }
+            } => match (mode, uid, gid, flags) {
+                (Some(mode), None, None, None) => format!("chmod {:o} {}", mode, path),
+                (None, Some(uid), None, None) => format_chown_description(path, Some(*uid), None),
+                (None, None, Some(gid), None) => format_chown_description(path, None, Some(*gid)),
+                (None, Some(uid), Some(gid), None) => {
+                    format_chown_description(path, Some(*uid), Some(*gid))
+                }
+                (None, None, None, Some(flags)) => format!("chattr flags=0x{flags:x} {path}"),
+                _ => {
+                    format!("setattr mode={mode:?} uid={uid:?} gid={gid:?} flags={flags:?} {path}")
+                }
+            },
         }
+    }
+}
+
+fn format_chown_description(path: &SandboxPath, uid: Option<u32>, gid: Option<u32>) -> String {
+    match (uid, gid) {
+        (Some(uid), Some(gid)) => format!("chown {uid}:{gid} {path}"),
+        (Some(uid), None) => format!("chown {uid} {path}"),
+        (None, Some(gid)) => format!("chown :{gid} {path}"),
+        (None, None) => format!("chown unchanged {path}"),
     }
 }
 
@@ -116,14 +134,22 @@ pub enum PendingDecision {
 
 pub type PendingWaiter = Arc<(Mutex<Option<PendingDecision>>, Condvar)>;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedPathScope {
+    pub path: SandboxPath,
+    pub recursive: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedOperation {
     pub id: u64,
     pub sandbox: String,
     pub token: String,
     pub pid: Option<u32>,
+    pub uid: Option<u32>,
     pub mountpoint: PathBuf,
     pub command: String,
+    pub paths: Vec<TrustedPathScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,10 +309,10 @@ impl Sandbox {
                     let entry = entry?;
                     let name = entry.file_name().to_string_lossy().into_owned();
                     let child = dir.join(&name)?;
-                    if !self.is_hidden(&child) {
-                        if let Some(resolved) = self.resolve(&child) {
-                            children.insert(name, resolved);
-                        }
+                    if !self.is_hidden(&child)
+                        && let Some(resolved) = self.resolve(&child)
+                    {
+                        children.insert(name, resolved);
                     }
                 }
             }
@@ -474,7 +500,7 @@ mod tests {
         let t2 = TempDir::new().unwrap();
         std::fs::write(t1.path().join("x"), "one").unwrap();
         std::fs::write(t2.path().join("x"), "two").unwrap();
-        let mut s = Sandbox::new("s", PathBuf::from("/tmp/s.log"));
+        let mut s = Sandbox::new("s", t1.path().join("s.log"));
         s.add_layer(t1.path(), SandboxPath::new("/a").unwrap());
         s.add_layer(t2.path(), SandboxPath::new("/a").unwrap());
         match s.resolve(&SandboxPath::new("/a/x").unwrap()).unwrap() {
@@ -489,7 +515,7 @@ mod tests {
     fn hide_is_overridden_by_newer_layer() {
         let t1 = TempDir::new().unwrap();
         let t2 = TempDir::new().unwrap();
-        let mut s = Sandbox::new("s", PathBuf::from("/tmp/s.log"));
+        let mut s = Sandbox::new("s", t1.path().join("s.log"));
         s.add_layer(t1.path(), SandboxPath::new("/a").unwrap());
         s.add_hide(SandboxPath::new("/a").unwrap());
         assert!(s.resolve(&SandboxPath::new("/a").unwrap()).is_none());
@@ -500,7 +526,7 @@ mod tests {
     #[test]
     fn virtual_dirs_exist_for_missing_intermediate_mount_dirs() {
         let t1 = TempDir::new().unwrap();
-        let mut s = Sandbox::new("s", PathBuf::from("/tmp/s.log"));
+        let mut s = Sandbox::new("s", t1.path().join("s.log"));
         s.add_layer(t1.path(), SandboxPath::new("/a/b/c").unwrap());
         assert!(matches!(
             s.resolve(&SandboxPath::new("/a").unwrap()),
@@ -515,7 +541,7 @@ mod tests {
     #[test]
     fn metadata_override_tracks_differences() {
         let t1 = TempDir::new().unwrap();
-        let mut s = Sandbox::new("s", PathBuf::from("/tmp/s.log"));
+        let mut s = Sandbox::new("s", t1.path().join("s.log"));
         s.add_layer(t1.path(), SandboxPath::new("/a").unwrap());
         s.apply_metadata_override(&MetadataOperation::Chmod {
             path: SandboxPath::new("/a").unwrap(),

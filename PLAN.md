@@ -16,7 +16,7 @@
 - 对用户绕过 sandboxfs CLI、直接在 FUSE 挂载点上执行 chmod/chown 等 metadata 修改操作，FUSE 通常只能看到 `setattr` 请求（path + metadata 变化），看不到用户原始 shell 命令；sandboxfs 需要生成 operation id、记录一条待授权请求并挂起，等待 TUI 或 CLI allow/deny。
 - 提供 monitor/mount/metadata 等查看命令；monitor 按 tail/tail -f 语义读取运行期日志。
 - 文件内容与目录结构的持久修改不会写回底层真实文件；第一版对 create/write/truncate/unlink/rename 等内容/结构修改直接返回只读或不支持错误，只实现读路径和 metadata override。
-- runtime 目录选择优先 `SANDBOXFS_RUNTIME_DIR`，否则用户态用 `$XDG_RUNTIME_DIR/sandboxfs`，系统态用 `/run/sandboxfs`；目录权限默认 `0700`。socket 默认位于 `<runtime>/<name>.sock`，`SANDBOXFS_SOCKET` 可覆盖。日志默认位于 `<runtime>/<name>.log`，`SANDBOXFS_LOG_DIR` 可覆盖目录。
+- runtime 目录选择优先 `SANDBOXFS_RUNTIME_DIR`，否则通过 `directories-rs` (`directories::ProjectDirs`) 获取项目 runtime 目录；若平台没有项目 runtime 目录，则退回到项目 cache 目录下的 `run` 子目录。目录权限默认 `0700`。socket 默认位于 `<runtime>/<name>.sock`，`SANDBOXFS_SOCKET` 可覆盖。日志默认位于 `<runtime>/<name>.log`，`SANDBOXFS_LOG_DIR` 可覆盖目录。
 
 ## Approach
 
@@ -35,7 +35,7 @@
   - `sandboxfs <name> destroy`：请求 session 清理状态、pending request、日志、mountpoint 并退出。
   - `sandboxfs <name> attach <mountpoint>` / `detach <mountpoint>`。
   - `sandboxfs <name> mount <local> <on_fs>` / `umount <on_fs>` / `hide <on_fs>`；无参数 `sandboxfs <name> mount` 列出映射与 hide 信息。
-  - `sandboxfs <name> chmod/chown/chattr ...`：CLI 先通过 IPC 请求 session 为本次操作创建临时 attach mountpoint（位于 runtime 目录，例如 `$XDG_RUNTIME_DIR/sandboxfs/tmp/<name>-<operation_id>/`），再在该目录作为 current working directory 的情况下 fork/exec PATH 上解析到的命令名。session 根据 FUSE request 的 pid/uid/path/operation token 将其自动 allow；子进程 exit status 原样作为 CLI 结果返回，随后 session detach 并清理临时 mountpoint。
+  - `sandboxfs <name> chmod/chown/chattr ...`：CLI 先通过 IPC 请求 session 为本次操作创建临时 attach mountpoint（位于 runtime 目录的 `tmp/<name>-<operation_id>/`），再在该目录作为 current working directory 的情况下 fork/exec PATH 上解析到的命令名。session 根据 FUSE request 的 pid/uid/path/operation token 将其自动 allow；子进程 exit status 原样作为 CLI 结果返回，随后 session detach 并清理临时 mountpoint。
   - `sandboxfs <name> allow <operation_id>` / `deny <operation_id>` 可以在没有 TUI 时处理 pending request，便于自动化。
   - `sandboxfs <name> allow --do-nothing <operation_id>` 只让挂起的 FUSE 请求返回成功，不改 sandbox metadata、不改底层文件。
 - `sandboxfs-access-tui <name>` 负责：
@@ -79,17 +79,17 @@
 - [x] 定义核心数据模型：sandbox、多个 permanent attach mountpoint、temporary operation mountpoint、mount layer、hide rule、virtual dir、metadata override、pending metadata request、trusted operation token/pid、operation id、runtime dir、log file path。
 - [x] 实现路径规范化和 overlay 解析规则。
 - [x] 实现 fuser 文件系统的只读文件/目录浏览、lookup、getattr、readdir、open、read 等基础能力；create/write/truncate/unlink/rename 等内容/结构修改第一版返回只读或不支持错误。
-- [x] 实现 runtime 目录选择：优先 `SANDBOXFS_RUNTIME_DIR`，否则用户态用 `$XDG_RUNTIME_DIR/sandboxfs`，系统态用 `/run/sandboxfs`；目录权限默认 `0700`。
+- [x] 实现 runtime 目录选择：优先 `SANDBOXFS_RUNTIME_DIR`，否则通过 `directories-rs` (`directories::ProjectDirs`) 获取项目 runtime 目录；若平台没有项目 runtime 目录，则退回到项目 cache 目录下的 `run` 子目录。目录权限默认 `0700`。
 - [x] 实现 `sandboxfs run <name>` / `sandboxfs <name> destroy`；`run` 清空对应运行期日志但不挂载 FUSE，`destroy` 清理内存状态、pending 请求和日志文件并退出。不实现全局 `list`。
 - [x] 实现 `sandboxfs <name> attach <mountpoint>` / `detach <mountpoint>`；`attach` 才调用 fuser mount，支持多个不同 mountpoint；同一路径重复 attach、mountpoint 不存在/不是目录/已被其他 sandbox 使用时失败；`detach <mountpoint>` 只卸载对应 mountpoint，重复 detach、路径不匹配、路径未挂载或属于其他 sandbox 时失败。
 - [x] 实现 `sandboxfs <name> mount <local> <on_fs>` / `umount <on_fs>` / `hide <on_fs>`，并写入日志；无参数 `sandboxfs <name> mount` 用于列出映射与 hide 信息。
 - [x] 实现 `sandboxfs <name> chmod/chown/chattr ...`：为该命令创建 runtime 下的临时 FUSE mountpoint、注册 trusted operation token/pid、规范化可识别的 sandbox 路径参数、以临时 mountpoint 为 current working directory fork/exec PATH 上解析到的命令、由 FUSE setattr/metadata request 在支持时更新内存 metadata/flag override，不修改真实文件；命令失败或操作不支持时正常报错，最后 detach 并清理临时 mountpoint。
 - [x] 实现 FUSE metadata 修改请求拦截：可信 CLI 请求跳过授权等待并正常执行/报错；非可信请求生成 operation id、写 `<id> <operation-description>` 日志、挂起请求、等待 allow/deny。
 - [x] 实现 `sandboxfs <name> allow` 无参数列出 pending 请求，`allow <id>`、`allow --do-nothing <id>`、`deny <id>` 处理指定请求。
-- [~] 实现 `sandboxfs-access-tui` 的 pending request 展示与 allow/deny/edit。当前实现支持展示、allow、deny、do-nothing；edit-command 仍需补完整可信命令重跑流。
+- [x] 实现 `sandboxfs-access-tui` 的 pending request 展示与 allow/deny/do-nothing/edit-command；edit-command 通过可信 `sandboxfs` CLI 路径重跑用户编辑后的 `chmod`/`chown`/`chattr`，再用 do-nothing 释放原始 pending 请求。
 - [x] 实现 `monitor` / `monitor -f`，按 tail/tail -f 语义读取运行期日志文件。
 - [x] 实现 `sandboxfs <name> metadata` 列出该 sandbox 内外 metadata 不一致的路径；不保留全局 `sandboxfs metadata`。
-- [~] 按 TDD/BDD 组织测试：已有核心单元测试和 CLI foreground session 集成测试；仍需补 TUI 测试、IPC 错误恢复测试、更多 FUSE success/error 测试和 BDD 场景测试。所有集成/行为/FUSE 测试必须直接创建独立 temp dir，并为每个测试设置唯一 `SANDBOXFS_RUNTIME_DIR`、`SANDBOXFS_SOCKET`、sandbox name、日志路径和 mountpoint，避免共享 session/socket/log；测试结束清理 temp dir/session/mount，确保用例之间隔离且可并行运行。需要真实 FUSE 的测试默认 gated/ignored，通过环境变量显式开启。
+- [x] 按 TDD/BDD 组织测试：核心单元测试、CLI foreground session 集成测试、TUI 测试、IPC 错误恢复测试、行为场景测试、非挂载 filesystem/state 错误测试，以及 gated real-FUSE success/error 测试。所有集成/行为/FUSE 测试直接创建独立 temp dir，并为每个测试设置唯一 `SANDBOXFS_RUNTIME_DIR`、`SANDBOXFS_SOCKET`、sandbox name、日志路径和 mountpoint，避免共享 session/socket/log；测试结束清理 temp dir/session/mount，确保用例之间隔离且可并行运行。真实 FUSE 测试默认 ignored，通过 `SANDBOXFS_RUN_FUSE_TESTS=1` 显式开启。
 - [x] 补充 README 使用示例和已知限制。
 
 ## Verification
@@ -99,11 +99,11 @@
 - `cargo test`
 - `cargo test --lib` 覆盖核心单元测试。
 - `cargo test --test cli_session` 覆盖 CLI foreground session 用户接口集成测试，包括成功命令、错误参数、错误退出码和日志行为；每个测试使用独立 temp dir/runtime/socket/sandbox。
-- 待补：`cargo test --test tui` 覆盖 TUI 用户接口集成测试，包括 pending request 展示、allow、deny、edit-command 和错误反馈；每个测试使用独立 temp dir/runtime/socket/sandbox。
-- 待补：`cargo test --test ipc` 覆盖 session/socket IPC 集成测试；每个测试启动自己的 foreground session 和 socket，避免测试间共享状态。
-- 待补：`cargo test --test behavior` 覆盖 BDD 用户行为场景；每个 scenario 使用独立 temp dir/runtime/socket/sandbox/mountpoint，可并行运行。
-- 待补：`cargo test --test fs_errors` 覆盖不依赖真实 mount 的 FUSE/filesystem 错误语义单元或模拟测试。
-- 待补：`SANDBOXFS_RUN_FUSE_TESTS=1 cargo test --test fuse_behavior -- --ignored` 在支持 FUSE 的 Linux 环境中运行真实挂载测试，覆盖 FUSE filesystem 成功路径与错误路径；每个测试使用独立 temp mountpoint 并在 drop/teardown 中强制 detach/unmount。
+- `cargo test --test tui` 覆盖 TUI 用户接口测试，包括 pending request 展示、allow/deny/do-nothing action 后端、edit-command 和错误反馈；每个测试使用独立 temp dir/runtime/socket/sandbox。
+- `cargo test --test ipc` 覆盖 session/socket IPC 集成测试；每个测试启动自己的 foreground session 和 socket，避免测试间共享状态。
+- `cargo test --test behavior` 覆盖 BDD 用户行为场景；每个 scenario 使用独立 temp dir/runtime/socket/sandbox/mountpoint，可并行运行。
+- `cargo test --test fs_errors` 覆盖不依赖真实 mount 的 filesystem/state 错误语义测试。
+- `SANDBOXFS_RUN_FUSE_TESTS=1 cargo test --test fuse_behavior -- --ignored` 在支持 FUSE 的 Linux 环境中运行真实挂载测试，覆盖 FUSE filesystem 成功路径与错误路径；每个测试使用独立 temp mountpoint 并在 drop/teardown 中强制 detach/unmount。
 - 在支持 FUSE 的 Linux 环境中手动验证：
   - `sandboxfs run demo` 前台启动后确认不会立刻创建 FUSE mount。
   - `sandboxfs demo attach /some/mountpoint` 后确认 FUSE 可访问，`sandboxfs demo detach /some/mountpoint` 后解除。
@@ -124,7 +124,7 @@
 - `sandboxfs run <name>` 是唯一创建 sandbox session 的方式；不使用单独 `sandboxfsd`，不自动启动后台 daemon，不保留 `sandboxfs list`。
 - `sandboxfs <name> attach <mountpoint>` / `sandboxfs <name> detach <mountpoint>` 用于把 sandbox 暴露/解除到本地目录；同一个 sandbox 支持多个永久 attach，detach 必须指定正确 mountpoint，重复 detach 或路径错误必须失败。
 - IPC 使用 Unix domain socket；默认放在 runtime 目录，`SANDBOXFS_SOCKET` 可覆盖。
-- runtime 目录优先 `SANDBOXFS_RUNTIME_DIR`，否则用户态使用 `$XDG_RUNTIME_DIR/sandboxfs`，系统态使用 `/run/sandboxfs`。
+- runtime 目录优先 `SANDBOXFS_RUNTIME_DIR`，否则由 `directories-rs` (`directories::ProjectDirs`) 选择项目 runtime 目录；无 runtime 目录的平台退回到项目 cache 目录下的 `run` 子目录。
 - `sandboxfs <name> destroy` 清理该 sandbox 的内存状态、pending 权限请求和 monitor 日志，并让前台 session 退出。
 - `sandboxfs <name> chmod/chown/chattr` 不依赖用户手动 attach；它会为本次命令创建临时 FUSE mountpoint，运行 PATH 上的对应命令，结束后立即 detach/清理。
 - `sandboxfs <name> allow` 无参数列出所有等待授权的 pending 请求；`allow/deny <operation_id>` 处理单个请求。

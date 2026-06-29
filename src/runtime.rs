@@ -4,11 +4,16 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::Result;
+use directories::ProjectDirs;
+
+use crate::{Error, Result};
 
 pub const ENV_RUNTIME_DIR: &str = "SANDBOXFS_RUNTIME_DIR";
 pub const ENV_SOCKET: &str = "SANDBOXFS_SOCKET";
 pub const ENV_LOG_DIR: &str = "SANDBOXFS_LOG_DIR";
+const QUALIFIER: &str = "net";
+const ORGANIZATION: &str = "xz-dev";
+const APPLICATION: &str = "sandboxfs";
 
 #[derive(Debug, Clone)]
 pub struct RuntimePaths {
@@ -74,13 +79,20 @@ pub fn runtime_dir() -> Result<PathBuf> {
     if let Some(value) = std::env::var_os(ENV_RUNTIME_DIR) {
         return Ok(PathBuf::from(value));
     }
-    if let Some(value) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return Ok(PathBuf::from(value).join("sandboxfs"));
+    let dirs = project_dirs()?;
+    Ok(runtime_dir_from_project_dirs(&dirs))
+}
+
+fn project_dirs() -> Result<ProjectDirs> {
+    ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
+        .ok_or_else(|| Error::msg("could not determine standard project directories for sandboxfs"))
+}
+
+fn runtime_dir_from_project_dirs(dirs: &ProjectDirs) -> PathBuf {
+    if let Some(runtime_dir) = dirs.runtime_dir() {
+        return runtime_dir.to_path_buf();
     }
-    if unsafe { libc::geteuid() } == 0 {
-        return Ok(PathBuf::from("/run/sandboxfs"));
-    }
-    Ok(std::env::temp_dir().join(format!("sandboxfs-{}", unsafe { libc::geteuid() })))
+    dirs.cache_dir().join("run")
 }
 
 pub fn ensure_runtime_dir(path: &Path) -> Result<()> {
@@ -98,18 +110,29 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn env_runtime_dir_wins() {
+        let _guard = env_lock();
         let temp = TempDir::new().unwrap();
+        let old_runtime = std::env::var_os(ENV_RUNTIME_DIR);
         unsafe {
             std::env::set_var(ENV_RUNTIME_DIR, temp.path());
-            std::env::remove_var("XDG_RUNTIME_DIR");
         }
         assert_eq!(runtime_dir().unwrap(), temp.path());
         unsafe {
-            std::env::remove_var(ENV_RUNTIME_DIR);
+            if let Some(old_runtime) = old_runtime {
+                std::env::set_var(ENV_RUNTIME_DIR, old_runtime);
+            } else {
+                std::env::remove_var(ENV_RUNTIME_DIR);
+            }
         }
     }
 
@@ -137,5 +160,22 @@ mod tests {
             runtime.sandbox_log_path("demo"),
             log_temp.path().join("demo.log")
         );
+    }
+
+    #[test]
+    fn default_runtime_comes_from_directories_project_dirs() {
+        let _guard = env_lock();
+        let old_runtime = std::env::var_os(ENV_RUNTIME_DIR);
+        unsafe {
+            std::env::remove_var(ENV_RUNTIME_DIR);
+        }
+        let dirs = project_dirs().unwrap();
+        let expected = runtime_dir_from_project_dirs(&dirs);
+        assert_eq!(runtime_dir().unwrap(), expected);
+        unsafe {
+            if let Some(old_runtime) = old_runtime {
+                std::env::set_var(ENV_RUNTIME_DIR, old_runtime);
+            }
+        }
     }
 }

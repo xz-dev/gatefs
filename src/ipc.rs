@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 use crate::path::SandboxPath;
-use crate::state::{MetadataOperation, PendingMetadataRequest};
+use crate::state::{PendingMetadataRequest, TrustedPathScope};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -49,17 +49,15 @@ pub enum Request {
         name: String,
         command: String,
         mountpoint: String,
+        paths: Vec<TrustedPathScope>,
     },
     RegisterTrustedPid {
         token: String,
         pid: u32,
+        uid: u32,
     },
     EndTrustedOperation {
         token: String,
-    },
-    ApplyMetadata {
-        name: String,
-        operation: MetadataOperation,
     },
     Pending {
         name: String,

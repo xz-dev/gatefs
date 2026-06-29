@@ -18,7 +18,7 @@ use crate::log;
 use crate::path::SandboxPath;
 use crate::runtime::RuntimePaths;
 use crate::state::{
-    AttachMount, MetadataOperation, PendingDecision, Sandbox, SandboxRegistry, TrustedOperation,
+    AttachMount, PendingDecision, Sandbox, SandboxRegistry, TrustedOperation, TrustedPathScope,
 };
 use crate::{Error, Result};
 
@@ -93,10 +93,12 @@ impl SessionState {
                 name,
                 command,
                 mountpoint,
-            } => self.begin_trusted(&name, &command, PathBuf::from(mountpoint)),
-            Request::RegisterTrustedPid { token, pid } => self.register_trusted_pid(&token, pid),
+                paths,
+            } => self.begin_trusted(&name, &command, PathBuf::from(mountpoint), paths),
+            Request::RegisterTrustedPid { token, pid, uid } => {
+                self.register_trusted_pid(&token, pid, uid)
+            }
             Request::EndTrustedOperation { token } => self.end_trusted(&token),
-            Request::ApplyMetadata { name, operation } => self.apply_metadata(&name, operation),
             Request::Pending { name } => self.pending(&name),
             Request::Allow {
                 name,
@@ -109,13 +111,34 @@ impl SessionState {
     }
 
     pub fn destroy(&self, name: &str) -> Result<Response> {
-        let mountpoints: Vec<PathBuf> = {
-            let registry = self.registry.lock().unwrap();
+        let (mountpoints, waiters) = {
+            let mut registry = self.registry.lock().unwrap();
             let Some(sandbox) = registry.sandboxes.get(name) else {
                 return Err(Error::msg(format!("sandbox not found: {name}")));
             };
-            sandbox.attaches.keys().cloned().collect()
+            let mountpoints: Vec<PathBuf> = sandbox.attaches.keys().cloned().collect();
+            let removed_pending: Vec<u64> = registry
+                .pending
+                .iter()
+                .filter_map(|(id, pending)| (pending.sandbox == name).then_some(*id))
+                .collect();
+            let mut waiters = Vec::new();
+            for id in removed_pending {
+                registry.pending.remove(&id);
+                if let Some(waiter) = registry.pending_waiters.remove(&id) {
+                    waiters.push(waiter);
+                }
+            }
+            registry
+                .trusted
+                .retain(|_, trusted| trusted.sandbox != name);
+            (mountpoints, waiters)
         };
+        for waiter in waiters {
+            let (lock, cvar) = &*waiter;
+            *lock.lock().unwrap() = Some(PendingDecision::Deny);
+            cvar.notify_all();
+        }
         for mountpoint in mountpoints {
             self.detach(name, &mountpoint)?;
         }
@@ -123,22 +146,6 @@ impl SessionState {
         let Some(sandbox) = registry.sandboxes.remove(name) else {
             return Ok(Response::Ok);
         };
-        let removed_pending: Vec<u64> = registry
-            .pending
-            .iter()
-            .filter_map(|(id, pending)| (pending.sandbox == name).then_some(*id))
-            .collect();
-        for id in removed_pending {
-            registry.pending.remove(&id);
-            if let Some(waiter) = registry.pending_waiters.remove(&id) {
-                let (lock, cvar) = &*waiter;
-                *lock.lock().unwrap() = Some(PendingDecision::Deny);
-                cvar.notify_all();
-            }
-        }
-        registry
-            .trusted
-            .retain(|_, trusted| trusted.sandbox != name);
         log::remove_log(&sandbox.log_path)?;
         Ok(Response::Ok)
     }
@@ -314,6 +321,7 @@ impl SessionState {
         name: &str,
         command: &str,
         requested_mountpoint: PathBuf,
+        paths: Vec<TrustedPathScope>,
     ) -> Result<Response> {
         let operation_id = {
             let mut registry = self.registry.lock().unwrap();
@@ -333,8 +341,10 @@ impl SessionState {
                 sandbox: name.to_string(),
                 token: token.clone(),
                 pid: None,
+                uid: None,
                 mountpoint: requested_mountpoint.clone(),
                 command: command.to_string(),
+                paths,
             },
         );
         Ok(Response::Trusted {
@@ -344,36 +354,26 @@ impl SessionState {
         })
     }
 
-    fn register_trusted_pid(&self, token: &str, pid: u32) -> Result<Response> {
+    fn register_trusted_pid(&self, token: &str, pid: u32, uid: u32) -> Result<Response> {
         let mut registry = self.registry.lock().unwrap();
         let trusted = registry
             .trusted
             .get_mut(token)
             .ok_or_else(|| Error::msg(format!("trusted operation not found: {token}")))?;
         trusted.pid = Some(pid);
+        trusted.uid = Some(uid);
         Ok(Response::Ok)
     }
 
     fn end_trusted(&self, token: &str) -> Result<Response> {
         let trusted = self.registry.lock().unwrap().trusted.remove(token);
         if let Some(trusted) = trusted {
-            let _ = self.detach(&trusted.sandbox, &trusted.mountpoint);
-            let _ = fs::remove_dir(&trusted.mountpoint);
+            self.detach(&trusted.sandbox, &trusted.mountpoint)?;
+            fs::remove_dir(&trusted.mountpoint)?;
             Ok(Response::Ok)
         } else {
             Err(Error::msg(format!("trusted operation not found: {token}")))
         }
-    }
-
-    fn apply_metadata(&self, name: &str, operation: MetadataOperation) -> Result<Response> {
-        let mut registry = self.registry.lock().unwrap();
-        let sandbox = registry
-            .sandboxes
-            .get_mut(name)
-            .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?;
-        sandbox.apply_metadata_override(&operation)?;
-        log::append_log(&sandbox.log_path, operation.description())?;
-        Ok(Response::Ok)
     }
 
     fn pending(&self, name: &str) -> Result<Response> {
@@ -462,7 +462,13 @@ pub fn serve_session(runtime: RuntimePaths, name: String) -> Result<()> {
     prepare_socket_path(&socket)?;
     let listener = UnixListener::bind(&socket)?;
     listener.set_nonblocking(true)?;
-    let state = Arc::new(SessionState::new_session(runtime.clone(), &name)?);
+    let state = match SessionState::new_session(runtime.clone(), &name) {
+        Ok(state) => Arc::new(state),
+        Err(error) => {
+            let _ = fs::remove_file(&socket);
+            return Err(error);
+        }
+    };
     let stop = Arc::new(AtomicBool::new(false));
     install_signal_handlers(Arc::clone(&stop))?;
 

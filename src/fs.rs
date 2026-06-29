@@ -84,11 +84,25 @@ impl SandboxFs {
         parent_path.join(Path::new(name)).map_err(|_| Errno::EINVAL)
     }
 
-    fn is_trusted_pid(registry: &SandboxRegistry, sandbox_name: &str, pid: u32) -> bool {
-        registry
-            .trusted
-            .values()
-            .any(|op| op.sandbox == sandbox_name && op.pid == Some(pid))
+    fn is_trusted_operation(
+        registry: &SandboxRegistry,
+        sandbox_name: &str,
+        pid: u32,
+        uid: u32,
+        path: &SandboxPath,
+    ) -> bool {
+        registry.trusted.values().any(|op| {
+            op.sandbox == sandbox_name
+                && op.pid == Some(pid)
+                && op.uid == Some(uid)
+                && op.paths.iter().any(|scope| {
+                    if scope.recursive {
+                        path.starts_with(&scope.path)
+                    } else {
+                        path == &scope.path
+                    }
+                })
+        })
     }
 
     fn create_pending_or_apply(
@@ -97,13 +111,19 @@ impl SandboxFs {
         path: SandboxPath,
         operation: MetadataOperation,
     ) -> std::result::Result<FileAttr, Errno> {
+        let unchanged_attr = self.attr_for_path(&path)?;
         let mut registry = self.registry.lock().unwrap();
-        let trusted = Self::is_trusted_pid(&registry, &self.sandbox_name, req.pid());
+        let trusted =
+            Self::is_trusted_operation(&registry, &self.sandbox_name, req.pid(), req.uid(), &path);
         if trusted {
             let sandbox = registry
                 .sandboxes
                 .get_mut(&self.sandbox_name)
                 .ok_or(Errno::ENOENT)?;
+            if sandbox.resolve(operation.path()).is_none() {
+                return Err(Errno::ENOTSUP);
+            }
+            log::append_log(&sandbox.log_path, operation.description()).map_err(|_| Errno::EIO)?;
             sandbox
                 .apply_metadata_override(&operation)
                 .map_err(|_| Errno::ENOTSUP)?;
@@ -119,6 +139,7 @@ impl SandboxFs {
             .map(|s| s.log_path.clone())
             .ok_or(Errno::ENOENT)?;
         let waiter: PendingWaiter = Arc::new((Mutex::new(None), Condvar::new()));
+        log::append_log(&log_path, format!("{id} {description}")).map_err(|_| Errno::EIO)?;
         registry.pending.insert(
             id,
             crate::state::PendingMetadataRequest {
@@ -132,7 +153,6 @@ impl SandboxFs {
             },
         );
         registry.pending_waiters.insert(id, Arc::clone(&waiter));
-        let _ = log::append_log(&log_path, format!("{id} {description}"));
         drop(registry);
 
         let (lock, cvar) = &*waiter;
@@ -153,7 +173,7 @@ impl SandboxFs {
                 drop(registry);
                 self.attr_for_path(&path)
             }
-            PendingDecision::DoNothing => self.attr_for_path(&path),
+            PendingDecision::DoNothing => Ok(unchanged_attr),
             PendingDecision::Deny => Err(Errno::EPERM),
         }
     }

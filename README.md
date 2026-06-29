@@ -15,17 +15,18 @@ sandboxfs run demo
 In another terminal, map local data into the sandbox and expose it through FUSE:
 
 ```sh
-mkdir -p /tmp/sandboxfs-demo-mnt
+DEMO_MNT="$(mktemp -d)"
 sandboxfs demo mount /some/local/dir /
-sandboxfs demo attach /tmp/sandboxfs-demo-mnt
-ls /tmp/sandboxfs-demo-mnt
-cat /tmp/sandboxfs-demo-mnt/file.txt
+sandboxfs demo attach "$DEMO_MNT"
+ls "$DEMO_MNT"
+cat "$DEMO_MNT/file.txt"
 ```
 
 Unmount one attach point:
 
 ```sh
-sandboxfs demo detach /tmp/sandboxfs-demo-mnt
+sandboxfs demo detach "$DEMO_MNT"
+rmdir "$DEMO_MNT"
 ```
 
 Stop the foreground session and drop all in-memory state:
@@ -50,14 +51,15 @@ sandboxfs <name> hide <on_fs>
 sandboxfs <name> chmod ...
 sandboxfs <name> chown ...
 sandboxfs <name> chattr ...
-sandboxfs <name> allow [--do-nothing] [operation_id]
+sandboxfs <name> allow [operation_id]
+sandboxfs <name> allow --do-nothing <operation_id>
 sandboxfs <name> deny <operation_id>
 sandboxfs <name> monitor [-f]
 sandboxfs <name> metadata
 sandboxfs-access-tui <name>
 ```
 
-`mount` without arguments lists mappings and hide rules for the sandbox.
+`mount` without arguments lists mappings and hide rules for the sandbox. `allow` without arguments lists pending metadata requests.
 
 ## Overlay and hide behavior
 
@@ -86,7 +88,7 @@ These trusted CLI-initiated operations skip the pending authorization flow, but 
 Direct metadata changes through an attached FUSE mountpoint are untrusted. For example:
 
 ```sh
-chmod 444 /tmp/sandboxfs-demo-mnt/file.txt
+chmod 444 "$DEMO_MNT/file.txt"
 ```
 
 That request becomes pending. Inspect or resolve it with:
@@ -101,6 +103,8 @@ sandboxfs-access-tui demo
 
 `allow --do-nothing` lets the blocked FUSE request return success without changing sandbox metadata or underlying files.
 
+The TUI displays pending requests and supports allow, deny, do-nothing, and edit-command. Edit-command reruns a user-edited `chmod`, `chown`, or `chattr` through the trusted `sandboxfs` CLI path, then releases the original pending request with do-nothing.
+
 ## Logs and monitoring
 
 Show the operation log:
@@ -110,13 +114,13 @@ sandboxfs demo monitor
 sandboxfs demo monitor -f
 ```
 
-Logs are reset when `sandboxfs run <name>` starts and are removed when the sandbox is destroyed.
+`monitor` prints the recent log tail; `monitor -f` starts at the same tail and follows new log entries. Logs are reset when `sandboxfs run <name>` starts and are removed when the sandbox is destroyed.
 
 ## Runtime paths
 
 - `SANDBOXFS_RUNTIME_DIR` overrides the runtime directory.
-- Default user runtime directory is `$XDG_RUNTIME_DIR/sandboxfs` when `XDG_RUNTIME_DIR` is set.
-- Default root/system runtime directory is `/run/sandboxfs`.
+- Without an override, `sandboxfs` asks `directories-rs` (`directories::ProjectDirs`) for the project runtime directory.
+- If the platform has no project runtime directory, it falls back to the project cache directory with a `run` child.
 - Runtime directories are created with mode `0700`.
 - Socket path defaults to `<runtime>/<name>.sock`.
 - `SANDBOXFS_SOCKET` overrides the socket path for special cases and tests.
@@ -127,9 +131,8 @@ Logs are reset when `sandboxfs run <name>` starts and are removed when the sandb
 ## Current limitations
 
 - File content and directory structure writes are intentionally read-only in this first version: create/write/truncate/unlink/rename/mkdir/rmdir return read-only or unsupported errors and never modify underlying files.
-- TUI edit-command support is not fully implemented yet; the TUI can display pending requests and allow/deny/do-nothing.
 - Real FUSE behavior depends on `/dev/fuse` and `fusermount3` availability and permissions.
-- The project is experimental and currently has limited integration/FUSE test coverage.
+- The project is experimental.
 
 ## Development checks
 
@@ -137,4 +140,5 @@ Logs are reset when `sandboxfs run <name>` starts and are removed when the sandb
 cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
+SANDBOXFS_RUN_FUSE_TESTS=1 cargo test --test fuse_behavior -- --ignored
 ```
