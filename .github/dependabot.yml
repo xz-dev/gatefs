@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    allow:
+      # Track every Cargo dependency class. With no update-types filter,
+      # Dependabot can open patch, minor, and major version-update PRs.
+      - dependency-type: "all"
