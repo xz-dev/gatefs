@@ -1138,6 +1138,83 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_same_kind_replacement_leaves_one_pending_per_path_kind() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path.clone());
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+        let path = SandboxPath::new("/data/file").unwrap();
+
+        let mut threads = Vec::new();
+        for offset in 0..10 {
+            let fs = fs.clone();
+            let path = path.clone();
+            threads.push(thread::spawn(move || {
+                let mode = 0o400 + offset;
+                match fs
+                    .begin_metadata_request(
+                        RequestIdentity {
+                            pid: mode,
+                            uid: 1000,
+                            gid: 1000,
+                        },
+                        path.clone(),
+                        MetadataOperation::Chmod {
+                            path,
+                            mode: mode as u16,
+                        },
+                    )
+                    .unwrap()
+                {
+                    MetadataOutcome::Pending(pending) => pending,
+                    MetadataOutcome::Applied(_) => panic!("expected pending request"),
+                }
+            }));
+        }
+
+        let pending_outcomes: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        let registry = registry.lock().unwrap();
+        assert_eq!(registry.pending.len(), 1);
+        assert_eq!(registry.pending_index.len(), 1);
+        let remaining_operation = registry
+            .pending
+            .values()
+            .next()
+            .unwrap()
+            .operation
+            .event_body();
+        drop(registry);
+
+        let mut still_pending = 0;
+        let mut denied = 0;
+        for pending in &pending_outcomes {
+            match *pending.waiter.0.lock().unwrap() {
+                Some(PendingDecision::Deny) => denied += 1,
+                None => {
+                    still_pending += 1;
+                    assert_eq!(pending.operation.event_body(), remaining_operation);
+                }
+                other => panic!("unexpected waiter decision: {other:?}"),
+            }
+        }
+        assert_eq!(still_pending, 1);
+        assert_eq!(denied, 9);
+
+        let data = log::read_log(&log_path).unwrap();
+        assert_eq!(
+            data.matches(" pending path=/data/file SETATTR mode=")
+                .count(),
+            10
+        );
+        assert_eq!(data.matches(" DENY reason=superseded").count(), 9);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
     fn pending_metadata_request_does_not_block_unrelated_lookup() {
         let temp = TempDir::new().unwrap();
         let log_path = temp.path().join("logs/demo.log");

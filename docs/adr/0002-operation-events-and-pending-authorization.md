@@ -66,6 +66,8 @@ Operation kinds are intentionally fine-grained:
 
 A later request with the same key behaves as if the user denied the earlier request first, then the later request arrived. The earlier blocked FUSE operation is unblocked with deny semantics. Requests with different keys can remain pending independently; for example, same-path `uid` and `gid` requests do not cancel each other.
 
+Pending inspection is read-only. Multiple CLI control commands or Access TUI instances may query the same foreground session socket at the same time without consuming, resolving, or deleting pending requests; only explicit allow/deny decisions mutate pending state.
+
 ### Ext4-like metadata effects on open files
 
 `sandboxfs` should mimic ext4 metadata behavior as closely as practical:

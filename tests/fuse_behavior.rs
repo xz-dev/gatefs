@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
 
-use common::{RunningSession, wait_until};
+use common::{RunningSession, sandboxfs_cmd_for, wait_until};
 
 fn require_fuse() {
     if std::env::var_os("SANDBOXFS_RUN_FUSE_TESTS").is_none() {
@@ -29,6 +29,16 @@ fn require_fuse() {
 
 fn fuse_enabled() -> bool {
     std::env::var_os("SANDBOXFS_RUN_FUSE_TESTS").is_some()
+}
+
+fn require_stress() {
+    if std::env::var_os("SANDBOXFS_RUN_STRESS_TESTS").is_none() {
+        eprintln!("set SANDBOXFS_RUN_STRESS_TESTS=1 to run FUSE stress tests");
+    }
+}
+
+fn stress_enabled() -> bool {
+    std::env::var_os("SANDBOXFS_RUN_STRESS_TESTS").is_some()
 }
 
 fn require_command(name: &str) {
@@ -82,6 +92,14 @@ fn assert_immutable_visible(path: &Path) {
 fn assert_not_immutable_visible(path: &Path) {
     let flags = lsattr_flags(path);
     assert!(!flags.contains('i'), "unexpected immutable flag in {flags}");
+}
+
+fn pending_ids(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(ToString::to_string)
+        .collect()
 }
 
 #[test]
@@ -347,6 +365,98 @@ fn direct_chattr_pending_can_be_allowed() {
 
     assert_not_immutable_visible(&mountpoint.join("data/file"));
     assert_eq!(lsattr_flags(&local.join("file")), host_flags_before);
+}
+
+#[test]
+#[ignore]
+fn stress_multiple_pending_viewers_do_not_consume_request() {
+    require_fuse();
+    require_stress();
+    if !fuse_enabled() || !stress_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_stress_pending_viewers");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut child = std::process::Command::new("chmod")
+        .args(["444", mountpoint.join("data/file").to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(3), || {
+        session
+            .sandbox_cmd()
+            .arg("allow")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("mode=0444"))
+            .unwrap_or(false)
+    }));
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    let id = pending_ids(&pending).into_iter().next().unwrap();
+    assert!(pending.contains(&format!("{id} path=/data/file SETATTR mode=0444")));
+
+    let runtime = session.runtime();
+    let log_dir = session.log_dir();
+    let name = session.name.clone();
+    let mut viewers = Vec::new();
+    for _ in 0..16 {
+        let runtime = runtime.clone();
+        let log_dir = log_dir.clone();
+        let name = name.clone();
+        let id = id.clone();
+        viewers.push(std::thread::spawn(move || {
+            let output = sandboxfs_cmd_for(&runtime, &log_dir)
+                .args([name.as_str(), "allow"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            assert!(stdout.contains(&format!("{id} path=/data/file SETATTR mode=0444")));
+        }));
+    }
+    for viewer in viewers {
+        viewer.join().unwrap();
+    }
+
+    let pending_after_viewers =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    assert!(pending_after_viewers.contains(&format!("{id} path=/data/file SETATTR mode=0444")));
+
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    assert!(wait_child(&mut child).success());
+    session
+        .sandbox_cmd()
+        .arg("allow")
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
+
+    let log = session_log(&session);
+    assert_eq!(
+        log.matches("pending path=/data/file SETATTR mode=0444")
+            .count(),
+        1
+    );
+    assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
 }
 
 #[test]

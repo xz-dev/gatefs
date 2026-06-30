@@ -22,7 +22,7 @@ A rule that removes a sandbox path and its descendants from visibility until a n
 A sandbox-local metadata change, such as mode, owner, group, or flags, that does not change the underlying local file or directory.
 
 ## Pending Metadata Request
-An untrusted metadata change requested through an attached filesystem that must be allowed or denied by the user.
+An untrusted metadata change requested through an attached filesystem that must be allowed or denied by the user. Viewing pending requests through the CLI or TUI is read-only and can happen concurrently; explicit allow/deny commands are what resolve pending state.
 
 ## Trusted Metadata Operation
 A metadata operation initiated through sandboxfs itself, which skips the pending authorization flow but can still fail normally.

@@ -773,6 +773,122 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_pending_views_do_not_consume_request() {
+        let (_temp, session, writer, waiter) = session_with_pending_request_and_writer();
+        let session = Arc::new(session);
+        let mut viewers = Vec::new();
+        for _ in 0..24 {
+            let session = Arc::clone(&session);
+            viewers.push(thread::spawn(move || {
+                match session.handle(Request::Pending {
+                    name: "a".to_string(),
+                }) {
+                    Response::Pending { items } => {
+                        assert_eq!(items.len(), 1);
+                        assert_eq!(items[0].id, 1);
+                        assert_eq!(items[0].description, "path=/data/file SETATTR mode=0444");
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            }));
+        }
+        for viewer in viewers {
+            viewer.join().unwrap();
+        }
+
+        match session.handle(Request::Allow {
+            name: "a".to_string(),
+            id: 1,
+            do_nothing: false,
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_waiter_decision(&waiter, PendingDecision::Apply);
+        assert_no_pending_request(&session);
+        drop(session);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn destroy_cleans_pending_indexes_and_notifies_waiters() {
+        let temp = TempDir::new().unwrap();
+        let runtime = RuntimePaths::for_tests(temp.path().to_path_buf(), None);
+        let writer = log::LogWriter::new();
+        let writer_handle = writer.handle();
+        let session = SessionState::with_log_writer(runtime, writer_handle, None);
+        session.create_initial("a").unwrap();
+        let waiters: Vec<_> = (1..=3)
+            .map(|_| Arc::new((Mutex::new(None), std::sync::Condvar::new())))
+            .collect();
+        {
+            let mut registry = session.registry.lock().unwrap();
+            for (id, (operation, kinds)) in [
+                (
+                    1,
+                    (
+                        crate::state::MetadataOperation::Chmod {
+                            path: SandboxPath::new("/data/file").unwrap(),
+                            mode: 0o444,
+                        },
+                        vec![crate::state::PendingOperationKind::Mode],
+                    ),
+                ),
+                (
+                    2,
+                    (
+                        crate::state::MetadataOperation::Chown {
+                            path: SandboxPath::new("/data/file").unwrap(),
+                            uid: Some(1000),
+                            gid: None,
+                        },
+                        vec![crate::state::PendingOperationKind::Uid],
+                    ),
+                ),
+                (
+                    3,
+                    (
+                        crate::state::MetadataOperation::Chattr {
+                            path: SandboxPath::new("/data/file").unwrap(),
+                            flags: crate::state::FS_IMMUTABLE_FL,
+                        },
+                        vec![crate::state::PendingOperationKind::Flags],
+                    ),
+                ),
+            ] {
+                registry.insert_pending_request(crate::state::PendingMetadataRequest {
+                    id,
+                    sandbox: "a".to_string(),
+                    description: operation.event_body(),
+                    operation,
+                    kinds,
+                    pid: 123,
+                    uid: 1000,
+                    gid: 1000,
+                });
+                registry
+                    .pending_waiters
+                    .insert(id, Arc::clone(&waiters[(id - 1) as usize]));
+            }
+        }
+
+        match session.handle(Request::Shutdown {
+            name: "a".to_string(),
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        for waiter in &waiters {
+            assert_waiter_decision(waiter, PendingDecision::Deny);
+        }
+        let registry = session.registry.lock().unwrap();
+        assert!(registry.pending.is_empty());
+        assert!(registry.pending_waiters.is_empty());
+        assert!(registry.pending_index.is_empty());
+    }
+
+    #[test]
     fn allow_applies_without_waiter_and_logs_decision() {
         let temp = TempDir::new().unwrap();
         std::fs::write(temp.path().join("file"), "data").unwrap();

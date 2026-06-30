@@ -1,5 +1,6 @@
 mod common;
 
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Stdio;
@@ -96,4 +97,51 @@ fn raw_ipc_ping_works() {
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).unwrap();
     assert_eq!(line.trim(), r#"{"status":"ok"}"#);
+}
+
+#[test]
+fn concurrent_pending_viewers_do_not_consume_socket_state() {
+    let session = RunningSession::start("demo_ipc_concurrent_viewers");
+    let local = session.temp.path().join("local");
+    fs::create_dir_all(&local).unwrap();
+    fs::write(local.join("file"), "hi").unwrap();
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+
+    let runtime = session.runtime();
+    let log_dir = session.log_dir();
+    let name = session.name.clone();
+    let mut viewers = Vec::new();
+    for _ in 0..24 {
+        let runtime = runtime.clone();
+        let log_dir = log_dir.clone();
+        let name = name.clone();
+        viewers.push(std::thread::spawn(move || {
+            let output = sandboxfs_cmd_for(&runtime, &log_dir)
+                .args([name.as_str(), "allow"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert!(String::from_utf8(output.stdout).unwrap().is_empty());
+        }));
+    }
+    for viewer in viewers {
+        viewer.join().unwrap();
+    }
+
+    session
+        .sandbox_cmd()
+        .arg("mount")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/data"));
+    session
+        .sandbox_cmd()
+        .arg("metadata")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
 }

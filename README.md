@@ -101,6 +101,8 @@ sandboxfs demo deny <operation_id>
 sandboxfs-access-tui demo
 ```
 
+Inspecting pending requests is read-only. Multiple CLI tools or Access TUI instances may view the same foreground session socket concurrently; only `allow`, `allow --do-nothing`, or `deny` resolves and removes a pending request.
+
 `allow --do-nothing` lets the blocked FUSE request return success without changing sandbox metadata or underlying files.
 
 The TUI displays pending requests and supports allow, deny, do-nothing, and edit-command. Edit-command reruns a user-edited `chmod`, `chown`, or `chattr` through the trusted `sandboxfs` CLI path, then releases the original pending request with do-nothing.
@@ -151,4 +153,5 @@ cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 SANDBOXFS_RUN_FUSE_TESTS=1 cargo test --test fuse_behavior -- --ignored
+SANDBOXFS_RUN_FUSE_TESTS=1 SANDBOXFS_RUN_STRESS_TESTS=1 cargo test --test fuse_behavior stress_multiple_pending_viewers_do_not_consume_request -- --ignored
 ```
