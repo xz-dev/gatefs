@@ -79,3 +79,44 @@ fn mount_hide_umount_monitor_and_destroy_use_isolated_runtime() {
     session.sandbox_cmd().arg("destroy").assert().success();
     assert!(session.wait_for_exit(Duration::from_secs(5)).success());
 }
+
+#[test]
+fn trusted_metadata_command_failure_preserves_underlying_metadata() {
+    let session = RunningSession::start("demo_cli_trusted_failure");
+    let local = session.temp.path().join("local");
+    fs::create_dir_all(&local).unwrap();
+    fs::write(local.join("file"), "hi").unwrap();
+    let before = fs::metadata(local.join("file")).unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+
+    session
+        .sandbox_cmd()
+        .args(["chmod", "444", "/missing"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("No such file")
+                .or(predicate::str::contains("No such file or directory")),
+        );
+
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let after = fs::metadata(local.join("file")).unwrap();
+    assert_eq!(
+        after.permissions().mode() & 0o777,
+        before.permissions().mode() & 0o777
+    );
+    assert_eq!(after.uid(), before.uid());
+    assert_eq!(after.gid(), before.gid());
+
+    session
+        .sandbox_cmd()
+        .arg("metadata")
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}

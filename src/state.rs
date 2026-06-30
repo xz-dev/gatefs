@@ -679,6 +679,17 @@ mod tests {
     }
 
     #[test]
+    fn virtual_dirs_disappear_after_last_nested_mount_is_removed() {
+        let t1 = TempDir::new().unwrap();
+        let mut s = Sandbox::new("s", t1.path().join("s.log"));
+        s.add_layer(t1.path(), SandboxPath::new("/a/b/c").unwrap());
+
+        assert!(s.remove_layer(&SandboxPath::new("/a/b/c").unwrap()));
+        assert!(s.resolve(&SandboxPath::new("/a").unwrap()).is_none());
+        assert!(s.resolve(&SandboxPath::new("/a/b").unwrap()).is_none());
+    }
+
+    #[test]
     fn metadata_override_tracks_differences() {
         let t1 = TempDir::new().unwrap();
         let mut s = Sandbox::new("s", t1.path().join("s.log"));

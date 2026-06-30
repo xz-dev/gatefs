@@ -772,6 +772,124 @@ mod tests {
         assert_waiter_decision(&waiter, PendingDecision::Deny);
     }
 
+    #[test]
+    fn allow_applies_without_waiter_and_logs_decision() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("file"), "data").unwrap();
+        let runtime = RuntimePaths::for_tests(temp.path().join("run"), None);
+        let writer = log::LogWriter::new();
+        let writer_handle = writer.handle();
+        let session = SessionState::with_log_writer(runtime, writer_handle, None);
+        session.create_initial("a").unwrap();
+        session
+            .mount_layer(
+                "a",
+                temp.path().to_path_buf(),
+                SandboxPath::new("/data").unwrap(),
+            )
+            .unwrap();
+        {
+            let mut registry = session.registry.lock().unwrap();
+            registry.insert_pending_request(crate::state::PendingMetadataRequest {
+                id: 2,
+                sandbox: "a".to_string(),
+                operation: crate::state::MetadataOperation::Chmod {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                    mode: 0o444,
+                },
+                kinds: vec![crate::state::PendingOperationKind::Mode],
+                pid: 123,
+                uid: 1000,
+                gid: 1000,
+                description: "path=/data/file SETATTR mode=0444".to_string(),
+            });
+            registry.next_operation_id = 3;
+        }
+
+        match session.handle(Request::Allow {
+            name: "a".to_string(),
+            id: 2,
+            do_nothing: false,
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let registry = session.registry.lock().unwrap();
+        let sandbox = registry.sandboxes.get("a").unwrap();
+        let override_ = sandbox
+            .metadata
+            .get(&SandboxPath::new("/data/file").unwrap())
+            .unwrap();
+        assert_eq!(override_.mode, Some(0o444));
+        assert!(!registry.pending.contains_key(&2));
+        assert!(
+            log::read_log(&session.runtime.sandbox_log_path("a"))
+                .unwrap()
+                .contains("decision request=2 ALLOW")
+        );
+    }
+
+    #[test]
+    fn allow_do_nothing_without_waiter_does_not_apply_override() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("file"), "data").unwrap();
+        let runtime = RuntimePaths::for_tests(temp.path().join("run"), None);
+        let writer = log::LogWriter::new();
+        let writer_handle = writer.handle();
+        let session = SessionState::with_log_writer(runtime, writer_handle, None);
+        session.create_initial("a").unwrap();
+        session
+            .mount_layer(
+                "a",
+                temp.path().to_path_buf(),
+                SandboxPath::new("/data").unwrap(),
+            )
+            .unwrap();
+        {
+            let mut registry = session.registry.lock().unwrap();
+            registry.insert_pending_request(crate::state::PendingMetadataRequest {
+                id: 2,
+                sandbox: "a".to_string(),
+                operation: crate::state::MetadataOperation::Chmod {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                    mode: 0o444,
+                },
+                kinds: vec![crate::state::PendingOperationKind::Mode],
+                pid: 123,
+                uid: 1000,
+                gid: 1000,
+                description: "path=/data/file SETATTR mode=0444".to_string(),
+            });
+            registry.next_operation_id = 3;
+        }
+
+        match session.handle(Request::Allow {
+            name: "a".to_string(),
+            id: 2,
+            do_nothing: true,
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let registry = session.registry.lock().unwrap();
+        assert!(
+            !registry
+                .sandboxes
+                .get("a")
+                .unwrap()
+                .metadata
+                .contains_key(&SandboxPath::new("/data/file").unwrap())
+        );
+        assert!(!registry.pending.contains_key(&2));
+        assert!(
+            log::read_log(&session.runtime.sandbox_log_path("a"))
+                .unwrap()
+                .contains("decision request=2 ALLOW_DO_NOTHING")
+        );
+    }
+
     fn session_with_stopped_writer_and_pending_request()
     -> (SessionState, crate::state::PendingWaiter) {
         let (_temp, session, writer, waiter) = session_with_pending_request_and_writer();

@@ -241,14 +241,23 @@ fn print_response(response: Response) -> Result<i32> {
             Ok(0)
         }
         Response::Pending { items } => {
-            for item in items {
-                println!("{} {}", item.id, item.description);
+            let text = format_pending_items(&items);
+            if !text.is_empty() {
+                println!("{text}");
             }
             Ok(0)
         }
         Response::Trusted { .. } => Ok(0),
         Response::Error { message } => Err(Error::msg(message)),
     }
+}
+
+fn format_pending_items(items: &[crate::state::PendingMetadataRequest]) -> String {
+    items
+        .iter()
+        .map(|item| format!("{} {}", item.id, item.description))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn run_trusted_command(
@@ -712,5 +721,42 @@ mod tests {
         assert_eq!(tail_lines(data, 2), "three\nfour\n");
         assert_eq!(tail_lines(data, 10), data);
         assert_eq!(tail_lines(data, 0), "");
+    }
+
+    #[test]
+    fn pending_response_lines_use_operation_descriptions() {
+        let items = vec![
+            crate::state::PendingMetadataRequest {
+                id: 7,
+                sandbox: "demo".to_string(),
+                operation: crate::state::MetadataOperation::Chmod {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                    mode: 0o444,
+                },
+                kinds: vec![crate::state::PendingOperationKind::Mode],
+                pid: 123,
+                uid: 1000,
+                gid: 1000,
+                description: "path=/data/file SETATTR mode=0444".to_string(),
+            },
+            crate::state::PendingMetadataRequest {
+                id: 8,
+                sandbox: "demo".to_string(),
+                operation: crate::state::MetadataOperation::Chattr {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                    flags: crate::state::FS_IMMUTABLE_FL,
+                },
+                kinds: vec![crate::state::PendingOperationKind::Flags],
+                pid: 123,
+                uid: 1000,
+                gid: 1000,
+                description: "path=/data/file CHATTR flags=0x10".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            format_pending_items(&items),
+            "7 path=/data/file SETATTR mode=0444\n8 path=/data/file CHATTR flags=0x10"
+        );
     }
 }
