@@ -18,12 +18,34 @@ use fuser::{
 use crate::log;
 use crate::path::SandboxPath;
 use crate::state::{
-    MetadataOperation, PendingDecision, PendingMetadataRequest, PendingWaiter, ResolvedPath,
-    SandboxRegistry, TTL, apply_override, mode_to_kind, stable_ino, virtual_dir_attr,
+    FS_IMMUTABLE_FL, MetadataOperation, PendingDecision, PendingMetadataRequest, PendingWaiter,
+    ResolvedPath, SandboxRegistry, TTL, apply_override, mode_to_kind, stable_ino, virtual_dir_attr,
 };
 
 const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
+const FS_IOC_GETFLAGS_INT: u32 = 0x8004_6601;
 const FS_IOC_SETFLAGS: u32 = 0x4008_6602;
+const FS_IOC_SETFLAGS_INT: u32 = 0x4004_6602;
+const FS_IOC_FSGETXATTR: u32 = 0x801c_581f;
+const FS_IOC_FSSETXATTR: u32 = 0x401c_5820;
+const FSXATTR_SIZE: usize = 28;
+const FS_APPEND_FL: u32 = 0x0000_0020;
+const FS_SYNC_FL: u32 = 0x0000_0008;
+const FS_NOATIME_FL: u32 = 0x0000_0080;
+const FS_NODUMP_FL: u32 = 0x0000_0040;
+const FS_PROJINHERIT_FL: u32 = 0x2000_0000;
+const FS_XFLAG_IMMUTABLE: u32 = 0x0000_0008;
+const FS_XFLAG_APPEND: u32 = 0x0000_0010;
+const FS_XFLAG_SYNC: u32 = 0x0000_0020;
+const FS_XFLAG_NOATIME: u32 = 0x0000_0040;
+const FS_XFLAG_NODUMP: u32 = 0x0000_0080;
+const FS_XFLAG_PROJINHERIT: u32 = 0x0000_0200;
+const FS_SUPPORTED_XFLAGS: u32 = FS_XFLAG_IMMUTABLE
+    | FS_XFLAG_APPEND
+    | FS_XFLAG_SYNC
+    | FS_XFLAG_NOATIME
+    | FS_XFLAG_NODUMP
+    | FS_XFLAG_PROJINHERIT;
 
 #[derive(Debug, Clone)]
 pub struct SandboxFs {
@@ -349,6 +371,72 @@ impl SandboxFs {
     }
 }
 
+fn flags_to_xflags(flags: u32) -> u32 {
+    let mut xflags = 0;
+    if flags & FS_IMMUTABLE_FL != 0 {
+        xflags |= FS_XFLAG_IMMUTABLE;
+    }
+    if flags & FS_APPEND_FL != 0 {
+        xflags |= FS_XFLAG_APPEND;
+    }
+    if flags & FS_SYNC_FL != 0 {
+        xflags |= FS_XFLAG_SYNC;
+    }
+    if flags & FS_NOATIME_FL != 0 {
+        xflags |= FS_XFLAG_NOATIME;
+    }
+    if flags & FS_NODUMP_FL != 0 {
+        xflags |= FS_XFLAG_NODUMP;
+    }
+    if flags & FS_PROJINHERIT_FL != 0 {
+        xflags |= FS_XFLAG_PROJINHERIT;
+    }
+    xflags
+}
+
+fn xflags_to_flags(xflags: u32) -> std::result::Result<u32, Errno> {
+    if xflags & !FS_SUPPORTED_XFLAGS != 0 {
+        return Err(Errno::ENOTSUP);
+    }
+    let mut flags = 0;
+    if xflags & FS_XFLAG_IMMUTABLE != 0 {
+        flags |= FS_IMMUTABLE_FL;
+    }
+    if xflags & FS_XFLAG_APPEND != 0 {
+        flags |= FS_APPEND_FL;
+    }
+    if xflags & FS_XFLAG_SYNC != 0 {
+        flags |= FS_SYNC_FL;
+    }
+    if xflags & FS_XFLAG_NOATIME != 0 {
+        flags |= FS_NOATIME_FL;
+    }
+    if xflags & FS_XFLAG_NODUMP != 0 {
+        flags |= FS_NODUMP_FL;
+    }
+    if xflags & FS_XFLAG_PROJINHERIT != 0 {
+        flags |= FS_PROJINHERIT_FL;
+    }
+    Ok(flags)
+}
+
+fn encode_fsxattr(flags: u32) -> [u8; FSXATTR_SIZE] {
+    let mut data = [0u8; FSXATTR_SIZE];
+    data[..4].copy_from_slice(&flags_to_xflags(flags).to_ne_bytes());
+    data
+}
+
+fn decode_fsxattr_flags(data: &[u8]) -> std::result::Result<u32, Errno> {
+    if data.len() < FSXATTR_SIZE {
+        return Err(Errno::EINVAL);
+    }
+    if data[4..FSXATTR_SIZE].iter().any(|byte| *byte != 0) {
+        return Err(Errno::ENOTSUP);
+    }
+    let xflags = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+    xflags_to_flags(xflags)
+}
+
 impl Filesystem for SandboxFs {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let Ok(path) = self.path_child(parent, name) else {
@@ -553,31 +641,63 @@ impl Filesystem for SandboxFs {
             reply.error(Errno::ENOENT);
             return;
         };
-        if cmd == FS_IOC_GETFLAGS {
-            match self.attr_for_path(&path) {
-                Ok(attr) => reply.ioctl(0, &u64::from(attr.flags).to_ne_bytes()),
+        match cmd {
+            FS_IOC_GETFLAGS | FS_IOC_GETFLAGS_INT => match self.attr_for_path(&path) {
+                Ok(attr) => reply.ioctl(0, &attr.flags.to_ne_bytes()),
                 Err(err) => reply.error(err),
-            }
-            return;
-        }
-        if cmd == FS_IOC_SETFLAGS {
-            if in_data.len() < 4 {
-                reply.error(Errno::EINVAL);
-                return;
-            }
-            let flags = u32::from_ne_bytes([in_data[0], in_data[1], in_data[2], in_data[3]]);
-            let operation = MetadataOperation::Chattr {
-                path: path.clone(),
-                flags,
-            };
-            match self.begin_metadata_request(RequestIdentity::from_request(req), path, operation) {
-                Ok(MetadataOutcome::Applied(_)) => reply.ioctl(0, &[]),
-                Ok(MetadataOutcome::Pending(pending)) => self.spawn_ioctl_waiter(pending, reply),
+            },
+            FS_IOC_FSGETXATTR => match self.attr_for_path(&path) {
+                Ok(attr) => reply.ioctl(0, &encode_fsxattr(attr.flags)),
                 Err(err) => reply.error(err),
+            },
+            FS_IOC_SETFLAGS | FS_IOC_SETFLAGS_INT => {
+                if in_data.len() < 4 {
+                    reply.error(Errno::EINVAL);
+                    return;
+                }
+                let flags = u32::from_ne_bytes([in_data[0], in_data[1], in_data[2], in_data[3]]);
+                let operation = MetadataOperation::Chattr {
+                    path: path.clone(),
+                    flags,
+                };
+                match self.begin_metadata_request(
+                    RequestIdentity::from_request(req),
+                    path,
+                    operation,
+                ) {
+                    Ok(MetadataOutcome::Applied(_)) => reply.ioctl(0, &[]),
+                    Ok(MetadataOutcome::Pending(pending)) => {
+                        self.spawn_ioctl_waiter(pending, reply)
+                    }
+                    Err(err) => reply.error(err),
+                }
             }
-            return;
+            FS_IOC_FSSETXATTR => {
+                let flags = match decode_fsxattr_flags(in_data) {
+                    Ok(flags) => flags,
+                    Err(err) => {
+                        reply.error(err);
+                        return;
+                    }
+                };
+                let operation = MetadataOperation::Chattr {
+                    path: path.clone(),
+                    flags,
+                };
+                match self.begin_metadata_request(
+                    RequestIdentity::from_request(req),
+                    path,
+                    operation,
+                ) {
+                    Ok(MetadataOutcome::Applied(_)) => reply.ioctl(0, &[]),
+                    Ok(MetadataOutcome::Pending(pending)) => {
+                        self.spawn_ioctl_waiter(pending, reply)
+                    }
+                    Err(err) => reply.error(err),
+                }
+            }
+            _ => reply.error(Errno::ENOTSUP),
         }
-        reply.error(Errno::ENOTSUP);
     }
 
     fn write(
@@ -760,6 +880,37 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn fsxattr_conversion_maps_common_inode_flags() {
+        let flags = FS_IMMUTABLE_FL
+            | FS_APPEND_FL
+            | FS_SYNC_FL
+            | FS_NOATIME_FL
+            | FS_NODUMP_FL
+            | FS_PROJINHERIT_FL;
+        let xflags = flags_to_xflags(flags);
+        assert_eq!(xflags & FS_XFLAG_IMMUTABLE, FS_XFLAG_IMMUTABLE);
+        assert_eq!(xflags & FS_XFLAG_APPEND, FS_XFLAG_APPEND);
+        assert_eq!(xflags & FS_XFLAG_SYNC, FS_XFLAG_SYNC);
+        assert_eq!(xflags & FS_XFLAG_NOATIME, FS_XFLAG_NOATIME);
+        assert_eq!(xflags & FS_XFLAG_NODUMP, FS_XFLAG_NODUMP);
+        assert_eq!(xflags & FS_XFLAG_PROJINHERIT, FS_XFLAG_PROJINHERIT);
+        assert_eq!(xflags_to_flags(xflags).unwrap(), flags);
+        assert_eq!(flags_to_xflags(0x1), 0);
+        assert_eq!(i32::from(xflags_to_flags(0x1).unwrap_err()), libc::ENOTSUP);
+        assert_eq!(decode_fsxattr_flags(&encode_fsxattr(flags)).unwrap(), flags);
+        let mut fsxattr_with_project_id = encode_fsxattr(FS_IMMUTABLE_FL);
+        fsxattr_with_project_id[12..16].copy_from_slice(&7u32.to_ne_bytes());
+        assert_eq!(
+            i32::from(decode_fsxattr_flags(&fsxattr_with_project_id).unwrap_err()),
+            libc::ENOTSUP
+        );
+        assert_eq!(
+            &encode_fsxattr(FS_IMMUTABLE_FL)[..4],
+            &FS_XFLAG_IMMUTABLE.to_ne_bytes()
+        );
     }
 
     #[test]
