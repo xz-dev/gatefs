@@ -54,12 +54,14 @@ sandboxfs <name> chattr ...
 sandboxfs <name> allow [operation_id]
 sandboxfs <name> allow --do-nothing <operation_id>
 sandboxfs <name> deny <operation_id>
+sandboxfs <name> cancel <operation_id>
+sandboxfs <name> cancel-all [mountpoint]
 sandboxfs <name> monitor [-f]
 sandboxfs <name> metadata
 sandboxfs-access-tui <name>
 ```
 
-`mount` without arguments lists mappings and hide rules for the sandbox. `allow` without arguments lists pending metadata requests.
+`mount` without arguments lists mappings and hide rules for the sandbox. `allow` without arguments lists pending authorization requests.
 
 ## Overlay and hide behavior
 
@@ -98,10 +100,12 @@ sandboxfs demo allow
 sandboxfs demo allow <operation_id>
 sandboxfs demo allow --do-nothing <operation_id>
 sandboxfs demo deny <operation_id>
+sandboxfs demo cancel <operation_id>
+sandboxfs demo cancel-all [mountpoint]
 sandboxfs-access-tui demo
 ```
 
-Inspecting pending requests is read-only. Multiple CLI tools or Access TUI instances may view the same foreground session socket concurrently; only `allow`, `allow --do-nothing`, or `deny` resolves and removes a pending request.
+Inspecting pending requests is read-only. Multiple CLI tools or Access TUI instances may view the same foreground session socket concurrently; `allow`, `allow --do-nothing`, `deny`, or lifecycle `cancel` resolves and removes a pending request. `cancel-all` cancels all pending requests in the sandbox, or only pending requests from the attached view identified by `<mountpoint>` when a mountpoint is provided.
 
 `allow --do-nothing` lets the blocked FUSE request return success without changing sandbox metadata or underlying files.
 

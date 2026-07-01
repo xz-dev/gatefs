@@ -19,8 +19,9 @@ use crate::log;
 use crate::path::SandboxPath;
 use crate::state::{
     FS_IMMUTABLE_FL, MetadataOperation, PendingDecision, PendingMetadataRequest,
-    PendingReadWriteRequest, PendingWaiter, ReadWriteOperation, ResolvedPath, SandboxRegistry, TTL,
-    apply_override, mode_to_kind, stable_ino, virtual_dir_attr,
+    PendingReadWriteRequest, PendingWaiter, ReadWriteOperation,
+    RequesterIdentity as RequestIdentity, ResolvedPath, SandboxRegistry, TTL, apply_override,
+    mode_to_kind, stable_ino, virtual_dir_attr,
 };
 
 const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
@@ -51,6 +52,7 @@ const FS_SUPPORTED_XFLAGS: u32 = FS_XFLAG_IMMUTABLE
 #[derive(Debug, Clone)]
 pub struct SandboxFs {
     pub sandbox_name: String,
+    pub attach_id: Option<u64>,
     pub registry: Arc<Mutex<SandboxRegistry>>,
     log_writer: log::LogWriterHandle,
     inodes: Arc<Mutex<HashMap<u64, SandboxPath>>>,
@@ -62,13 +64,6 @@ pub struct SandboxFs {
 struct HandleInfo {
     local_path: PathBuf,
     sandbox_path: SandboxPath,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RequestIdentity {
-    pid: u32,
-    uid: u32,
-    gid: u32,
 }
 
 struct PendingMetadataOutcome {
@@ -87,6 +82,7 @@ enum MetadataOutcome {
 enum ReadWriteDecision {
     Proceed,
     Denied,
+    Canceled,
 }
 
 impl RequestIdentity {
@@ -105,10 +101,20 @@ impl SandboxFs {
         registry: Arc<Mutex<SandboxRegistry>>,
         log_writer: log::LogWriterHandle,
     ) -> Self {
+        Self::new_with_attach_id(sandbox_name, None, registry, log_writer)
+    }
+
+    pub fn new_with_attach_id(
+        sandbox_name: impl Into<String>,
+        attach_id: Option<u64>,
+        registry: Arc<Mutex<SandboxRegistry>>,
+        log_writer: log::LogWriterHandle,
+    ) -> Self {
         let mut inodes = HashMap::new();
         inodes.insert(1, SandboxPath::root());
         Self {
             sandbox_name: sandbox_name.into(),
+            attach_id,
             registry,
             log_writer,
             inodes: Arc::new(Mutex::new(inodes)),
@@ -276,15 +282,18 @@ impl SandboxFs {
             }
         }
         for old_id in unique_replacement_ids {
-            if registry.remove_pending_request(old_id).is_some() {
+            if let Some(old_request) = registry.remove_pending_request(old_id) {
                 let decision_id = registry.next_operation_id();
+                let attach_field = format_attach_field(old_request.attach_id);
                 if self
                     .log_writer
                     .append(
                         &log_path,
                         log::format_log_line(
                             decision_id,
-                            &format!("decision request={old_id} DENY reason=superseded"),
+                            &format!(
+                                "decision request={old_id}{attach_field} DENY reason=superseded"
+                            ),
                         ),
                     )
                     .is_err()
@@ -300,7 +309,13 @@ impl SandboxFs {
             .log_writer
             .append(
                 &log_path,
-                log::format_log_line(id, &format!("pending {description}")),
+                log::format_log_line(
+                    id,
+                    &format!(
+                        "pending{} {description}",
+                        format_attach_field(self.attach_id)
+                    ),
+                ),
             )
             .is_err()
         {
@@ -316,6 +331,7 @@ impl SandboxFs {
         let request = PendingMetadataRequest {
             id,
             sandbox: self.sandbox_name.clone(),
+            attach_id: self.attach_id,
             operation: operation.clone(),
             kinds,
             pid: identity.pid,
@@ -360,17 +376,22 @@ impl SandboxFs {
         self.log_writer
             .append(
                 &log_path,
-                log::format_log_line(id, &format!("pending {description}")),
+                log::format_log_line(
+                    id,
+                    &format!(
+                        "pending{} {description}",
+                        format_attach_field(self.attach_id)
+                    ),
+                ),
             )
             .map_err(|_| Errno::EIO)?;
-        registry.insert_pending_read_write_request(PendingReadWriteRequest::new_with_path(
+        registry.insert_pending_read_write_request(PendingReadWriteRequest::new_with_attach_path(
             id,
             self.sandbox_name.clone(),
+            self.attach_id,
             operation,
             protected_path,
-            identity.pid,
-            identity.uid,
-            identity.gid,
+            identity,
         ));
         registry.pending_waiters.insert(id, Arc::clone(&waiter));
         drop(registry);
@@ -378,6 +399,7 @@ impl SandboxFs {
         match wait_for_decision(&waiter) {
             PendingDecision::Apply | PendingDecision::DoNothing => Ok(ReadWriteDecision::Proceed),
             PendingDecision::Deny => Ok(ReadWriteDecision::Denied),
+            PendingDecision::Cancel => Ok(ReadWriteDecision::Canceled),
         }
     }
 
@@ -392,6 +414,7 @@ impl SandboxFs {
             }
             PendingDecision::DoNothing => Ok(pending.unchanged_attr),
             PendingDecision::Deny => Err(Errno::EPERM),
+            PendingDecision::Cancel => Err(Errno::ECANCELED),
         }
     }
 
@@ -426,6 +449,7 @@ impl SandboxFs {
             },
             PendingDecision::DoNothing => reply.ioctl(0, &[]),
             PendingDecision::Deny => reply.error(Errno::EPERM),
+            PendingDecision::Cancel => reply.error(Errno::ECANCELED),
         });
     }
 }
@@ -540,6 +564,10 @@ impl Filesystem for SandboxFs {
                 reply.error(Errno::EACCES);
                 return;
             }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
+                return;
+            }
             Err(err) => {
                 reply.error(err);
                 return;
@@ -596,6 +624,7 @@ impl Filesystem for SandboxFs {
             ) {
                 Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
                 Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+                Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
                 Err(err) => reply.error(err),
             }
             return;
@@ -649,6 +678,10 @@ impl Filesystem for SandboxFs {
             Ok(ReadWriteDecision::Proceed) => {}
             Ok(ReadWriteDecision::Denied) => {
                 reply.error(Errno::EACCES);
+                return;
+            }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
                 return;
             }
             Err(err) => {
@@ -717,6 +750,7 @@ impl Filesystem for SandboxFs {
             ) {
                 Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
                 Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+                Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
                 Err(err) => reply.error(err),
             }
             return;
@@ -833,6 +867,7 @@ impl Filesystem for SandboxFs {
         ) {
             Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
             Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
             Err(err) => reply.error(err),
         }
     }
@@ -857,6 +892,7 @@ impl Filesystem for SandboxFs {
         ) {
             Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
             Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
             Err(err) => reply.error(err),
         }
     }
@@ -880,6 +916,7 @@ impl Filesystem for SandboxFs {
         ) {
             Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
             Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
             Err(err) => reply.error(err),
         }
     }
@@ -895,6 +932,7 @@ impl Filesystem for SandboxFs {
         ) {
             Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
             Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
             Err(err) => reply.error(err),
         }
     }
@@ -910,6 +948,7 @@ impl Filesystem for SandboxFs {
         ) {
             Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
             Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
             Err(err) => reply.error(err),
         }
     }
@@ -938,9 +977,16 @@ impl Filesystem for SandboxFs {
         ) {
             Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
             Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
             Err(err) => reply.error(err),
         }
     }
+}
+
+fn format_attach_field(attach_id: Option<u64>) -> String {
+    attach_id
+        .map(|id| format!(" attach={id}"))
+        .unwrap_or_default()
 }
 
 fn wait_for_decision(waiter: &PendingWaiter) -> PendingDecision {
