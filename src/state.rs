@@ -128,6 +128,13 @@ impl ReadWriteOperation {
         }
     }
 
+    pub fn protection_paths(&self) -> Vec<&SandboxPath> {
+        match self {
+            Self::Rename { from, to } => vec![from, to],
+            _ => vec![self.path()],
+        }
+    }
+
     pub fn description(&self) -> String {
         self.event_body()
     }
@@ -387,11 +394,24 @@ impl PendingReadWriteRequest {
         uid: u32,
         gid: u32,
     ) -> Self {
+        let path = operation.path().clone();
+        Self::new_with_path(id, sandbox, operation, path, pid, uid, gid)
+    }
+
+    pub fn new_with_path(
+        id: u64,
+        sandbox: String,
+        operation: ReadWriteOperation,
+        path: SandboxPath,
+        pid: u32,
+        uid: u32,
+        gid: u32,
+    ) -> Self {
         Self {
             id,
             sandbox,
             kind: operation.kind(),
-            path: operation.path().clone(),
+            path,
             description: operation.description(),
             operation,
             pid,
