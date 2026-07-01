@@ -18,8 +18,9 @@ use fuser::{
 use crate::log;
 use crate::path::SandboxPath;
 use crate::state::{
-    FS_IMMUTABLE_FL, MetadataOperation, PendingDecision, PendingMetadataRequest, PendingWaiter,
-    ResolvedPath, SandboxRegistry, TTL, apply_override, mode_to_kind, stable_ino, virtual_dir_attr,
+    FS_IMMUTABLE_FL, MetadataOperation, PendingDecision, PendingMetadataRequest,
+    PendingReadWriteRequest, PendingWaiter, ReadWriteOperation, ResolvedPath, SandboxRegistry, TTL,
+    apply_override, mode_to_kind, stable_ino, virtual_dir_attr,
 };
 
 const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
@@ -53,8 +54,14 @@ pub struct SandboxFs {
     pub registry: Arc<Mutex<SandboxRegistry>>,
     log_writer: log::LogWriterHandle,
     inodes: Arc<Mutex<HashMap<u64, SandboxPath>>>,
-    handles: Arc<Mutex<HashMap<u64, PathBuf>>>,
+    handles: Arc<Mutex<HashMap<u64, HandleInfo>>>,
     next_handle: Arc<Mutex<u64>>,
+}
+
+#[derive(Debug, Clone)]
+struct HandleInfo {
+    local_path: PathBuf,
+    sandbox_path: SandboxPath,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +81,12 @@ struct PendingMetadataOutcome {
 enum MetadataOutcome {
     Applied(FileAttr),
     Pending(PendingMetadataOutcome),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadWriteDecision {
+    Proceed,
+    Denied,
 }
 
 impl RequestIdentity {
@@ -322,6 +335,52 @@ impl SandboxFs {
         }))
     }
 
+    fn authorize_read_write(
+        &self,
+        identity: RequestIdentity,
+        operation: ReadWriteOperation,
+    ) -> std::result::Result<ReadWriteDecision, Errno> {
+        let kind = operation.kind();
+        let description = operation.event_body();
+        let mut registry = self.registry.lock().unwrap();
+        let Some(sandbox) = registry.sandboxes.get(&self.sandbox_name) else {
+            return Err(Errno::ENOENT);
+        };
+        let Some(protected_path) = operation
+            .protection_paths()
+            .into_iter()
+            .find(|path| sandbox.is_protected(kind, path))
+            .cloned()
+        else {
+            return Ok(ReadWriteDecision::Proceed);
+        };
+        let log_path = sandbox.log_path.clone();
+        let waiter: PendingWaiter = Arc::new((Mutex::new(None), Condvar::new()));
+        let id = registry.next_operation_id();
+        self.log_writer
+            .append(
+                &log_path,
+                log::format_log_line(id, &format!("pending {description}")),
+            )
+            .map_err(|_| Errno::EIO)?;
+        registry.insert_pending_read_write_request(PendingReadWriteRequest::new_with_path(
+            id,
+            self.sandbox_name.clone(),
+            operation,
+            protected_path,
+            identity.pid,
+            identity.uid,
+            identity.gid,
+        ));
+        registry.pending_waiters.insert(id, Arc::clone(&waiter));
+        drop(registry);
+
+        match wait_for_decision(&waiter) {
+            PendingDecision::Apply | PendingDecision::DoNothing => Ok(ReadWriteDecision::Proceed),
+            PendingDecision::Deny => Ok(ReadWriteDecision::Denied),
+        }
+    }
+
     fn finish_pending_attr(
         &self,
         pending: PendingMetadataOutcome,
@@ -462,7 +521,7 @@ impl Filesystem for SandboxFs {
 
     fn readdir(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         _fh: FileHandle,
         offset: u64,
@@ -472,6 +531,20 @@ impl Filesystem for SandboxFs {
             reply.error(Errno::ENOENT);
             return;
         };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::ReadDirectory { path: dir.clone() },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        }
         let entries = {
             let registry = self.registry.lock().unwrap();
             let Some(sandbox) = registry.sandboxes.get(&self.sandbox_name) else {
@@ -511,15 +584,22 @@ impl Filesystem for SandboxFs {
         reply.ok();
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
-        if flags.acc_mode() != OpenAccMode::O_RDONLY {
-            reply.error(Errno::EROFS);
-            return;
-        }
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let Some(path) = self.path_for_ino(ino) else {
             reply.error(Errno::ENOENT);
             return;
         };
+        if flags.acc_mode() != OpenAccMode::O_RDONLY {
+            match self.authorize_read_write(
+                RequestIdentity::from_request(req),
+                ReadWriteOperation::OpenWrite { path },
+            ) {
+                Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+                Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+                Err(err) => reply.error(err),
+            }
+            return;
+        }
         let registry = self.registry.lock().unwrap();
         let Some(sandbox) = registry.sandboxes.get(&self.sandbox_name) else {
             reply.error(Errno::ENOENT);
@@ -530,7 +610,13 @@ impl Filesystem for SandboxFs {
                 let mut next = self.next_handle.lock().unwrap();
                 let fh = *next;
                 *next += 1;
-                self.handles.lock().unwrap().insert(fh, local_path);
+                self.handles.lock().unwrap().insert(
+                    fh,
+                    HandleInfo {
+                        local_path,
+                        sandbox_path: path.clone(),
+                    },
+                );
                 reply.opened(FileHandle(fh), FopenFlags::empty());
             }
             Some(ResolvedPath::VirtualDir { .. }) => reply.error(Errno::EISDIR),
@@ -541,7 +627,7 @@ impl Filesystem for SandboxFs {
 
     fn read(
         &self,
-        _req: &Request,
+        req: &Request,
         _ino: INodeNo,
         fh: FileHandle,
         offset: u64,
@@ -550,11 +636,27 @@ impl Filesystem for SandboxFs {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyData,
     ) {
-        let Some(path) = self.handles.lock().unwrap().get(&fh.0).cloned() else {
+        let Some(handle) = self.handles.lock().unwrap().get(&fh.0).cloned() else {
             reply.error(Errno::EBADF);
             return;
         };
-        let mut file = match File::open(path) {
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::ReadFile {
+                path: handle.sandbox_path,
+            },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        }
+        let mut file = match File::open(handle.local_path) {
             Ok(file) => file,
             Err(err) => {
                 reply.error(io_to_errno(err));
@@ -604,14 +706,21 @@ impl Filesystem for SandboxFs {
         flags: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        if size.is_some() {
-            reply.error(Errno::EROFS);
-            return;
-        }
         let Some(path) = self.path_for_ino(ino) else {
             reply.error(Errno::ENOENT);
             return;
         };
+        if size.is_some() {
+            match self.authorize_read_write(
+                RequestIdentity::from_request(req),
+                ReadWriteOperation::Truncate { path },
+            ) {
+                Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+                Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+                Err(err) => reply.error(err),
+            }
+            return;
+        }
         let operation = MetadataOperation::SetAttr {
             path: path.clone(),
             mode: mode.map(|m| (m & 0o7777) as u16),
@@ -702,9 +811,9 @@ impl Filesystem for SandboxFs {
 
     fn write(
         &self,
-        _req: &Request,
+        req: &Request,
         _ino: INodeNo,
-        _fh: FileHandle,
+        fh: FileHandle,
         _offset: u64,
         _data: &[u8],
         _write_flags: fuser::WriteFlags,
@@ -712,53 +821,125 @@ impl Filesystem for SandboxFs {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
-        reply.error(Errno::EROFS);
+        let Some(handle) = self.handles.lock().unwrap().get(&fh.0).cloned() else {
+            reply.error(Errno::EBADF);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::WriteFile {
+                path: handle.sandbox_path,
+            },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Err(err) => reply.error(err),
+        }
     }
 
     fn create(
         &self,
-        _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        reply.error(Errno::EROFS);
+        let Ok(path) = self.path_child(parent, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Create { path },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Err(err) => reply.error(err),
+        }
     }
 
     fn mkdir(
         &self,
-        _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
         _mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EROFS);
+        let Ok(path) = self.path_child(parent, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Mkdir { path },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Err(err) => reply.error(err),
+        }
     }
 
-    fn unlink(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let Ok(path) = self.path_child(parent, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Unlink { path },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Err(err) => reply.error(err),
+        }
     }
 
-    fn rmdir(&self, _req: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(Errno::EROFS);
+    fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let Ok(path) = self.path_child(parent, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Rmdir { path },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Err(err) => reply.error(err),
+        }
     }
 
     fn rename(
         &self,
-        _req: &Request,
-        _parent: INodeNo,
-        _name: &OsStr,
-        _newparent: INodeNo,
-        _newname: &OsStr,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
         _flags: fuser::RenameFlags,
         reply: ReplyEmpty,
     ) {
-        reply.error(Errno::EROFS);
+        let Ok(from) = self.path_child(parent, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let Ok(to) = self.path_child(newparent, newname) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Rename { from, to },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Err(err) => reply.error(err),
+        }
     }
 }
 
@@ -847,7 +1028,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::state::{Sandbox, TrustedOperation, TrustedPathScope};
+    use crate::state::{
+        ProtectionKind, ReadWriteOperation, Sandbox, TrustedOperation, TrustedPathScope,
+    };
 
     fn registry_with_file(temp: &TempDir, log_path: PathBuf) -> Arc<Mutex<SandboxRegistry>> {
         let local = temp.path().join("local");
@@ -882,6 +1065,56 @@ mod tests {
         }
     }
 
+    fn wait_for_pending_read_write(registry: &Arc<Mutex<SandboxRegistry>>) -> u64 {
+        let start = Instant::now();
+        loop {
+            if let Some(id) = registry
+                .lock()
+                .unwrap()
+                .pending_read_write
+                .keys()
+                .next()
+                .copied()
+            {
+                return id;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "pending read/write operation did not appear"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_pending_read_write_count(registry: &Arc<Mutex<SandboxRegistry>>, expected: usize) {
+        let start = Instant::now();
+        loop {
+            if registry.lock().unwrap().pending_read_write.len() == expected {
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(3),
+                "pending read/write count did not reach {expected}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn resolve_pending_read_write(
+        registry: &Arc<Mutex<SandboxRegistry>>,
+        id: u64,
+        decision: PendingDecision,
+    ) {
+        let waiter = {
+            let mut registry = registry.lock().unwrap();
+            registry.remove_pending_read_write_request(id);
+            registry.pending_waiters.remove(&id).unwrap()
+        };
+        let (lock, cvar) = &*waiter;
+        *lock.lock().unwrap() = Some(decision);
+        cvar.notify_all();
+    }
+
     #[test]
     fn fsxattr_conversion_maps_common_inode_flags() {
         let flags = FS_IMMUTABLE_FL
@@ -911,6 +1144,263 @@ mod tests {
             &encode_fsxattr(FS_IMMUTABLE_FL)[..4],
             &FS_XFLAG_IMMUTABLE.to_ne_bytes()
         );
+    }
+
+    #[test]
+    fn protected_read_file_waits_for_decision_and_then_reads() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path.clone());
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.sandboxes.get_mut("demo").unwrap().protect(
+                ProtectionKind::Read,
+                SandboxPath::new("/data/file").unwrap(),
+            );
+        }
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let worker = {
+            let fs = fs.clone();
+            thread::spawn(move || {
+                fs.authorize_read_write(
+                    RequestIdentity {
+                        pid: 123,
+                        uid: 1000,
+                        gid: 1000,
+                    },
+                    ReadWriteOperation::ReadFile {
+                        path: SandboxPath::new("/data/file").unwrap(),
+                    },
+                )
+            })
+        };
+
+        let id = wait_for_pending_read_write(&registry);
+        {
+            let registry = registry.lock().unwrap();
+            let pending = registry.pending_read_write.get(&id).unwrap();
+            assert_eq!(pending.kind, ProtectionKind::Read);
+            assert_eq!(pending.path, SandboxPath::new("/data/file").unwrap());
+            assert_eq!(pending.description, "path=/data/file READ file");
+        }
+        let data = log::read_log(&log_path).unwrap();
+        assert!(data.contains(&format!(" id={id} pending path=/data/file READ file")));
+
+        resolve_pending_read_write(&registry, id, PendingDecision::Apply);
+        assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Proceed);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn protected_read_deny_returns_denied_decision() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path);
+        registry
+            .lock()
+            .unwrap()
+            .sandboxes
+            .get_mut("demo")
+            .unwrap()
+            .protect(
+                ProtectionKind::Read,
+                SandboxPath::new("/data/file").unwrap(),
+            );
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let worker = {
+            let fs = fs.clone();
+            thread::spawn(move || {
+                fs.authorize_read_write(
+                    RequestIdentity {
+                        pid: 123,
+                        uid: 1000,
+                        gid: 1000,
+                    },
+                    ReadWriteOperation::ReadFile {
+                        path: SandboxPath::new("/data/file").unwrap(),
+                    },
+                )
+            })
+        };
+
+        let id = wait_for_pending_read_write(&registry);
+        resolve_pending_read_write(&registry, id, PendingDecision::Deny);
+        assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Denied);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn unprotected_read_write_operation_does_not_create_pending_request() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path);
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let decision = fs
+            .authorize_read_write(
+                RequestIdentity {
+                    pid: 123,
+                    uid: 1000,
+                    gid: 1000,
+                },
+                ReadWriteOperation::ReadFile {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(decision, ReadWriteDecision::Proceed);
+        assert!(registry.lock().unwrap().pending_read_write.is_empty());
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn protected_write_do_nothing_continues_to_existing_read_only_behavior() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path);
+        registry
+            .lock()
+            .unwrap()
+            .sandboxes
+            .get_mut("demo")
+            .unwrap()
+            .protect(
+                ProtectionKind::Write,
+                SandboxPath::new("/data/file").unwrap(),
+            );
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let worker = {
+            let fs = fs.clone();
+            thread::spawn(move || {
+                fs.authorize_read_write(
+                    RequestIdentity {
+                        pid: 123,
+                        uid: 1000,
+                        gid: 1000,
+                    },
+                    ReadWriteOperation::WriteFile {
+                        path: SandboxPath::new("/data/file").unwrap(),
+                    },
+                )
+            })
+        };
+
+        let id = wait_for_pending_read_write(&registry);
+        resolve_pending_read_write(&registry, id, PendingDecision::DoNothing);
+        assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Proceed);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn protected_rename_queues_when_either_side_is_protected() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path);
+        registry
+            .lock()
+            .unwrap()
+            .sandboxes
+            .get_mut("demo")
+            .unwrap()
+            .protect(
+                ProtectionKind::Write,
+                SandboxPath::new("/data/new").unwrap(),
+            );
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let worker = {
+            let fs = fs.clone();
+            thread::spawn(move || {
+                fs.authorize_read_write(
+                    RequestIdentity {
+                        pid: 123,
+                        uid: 1000,
+                        gid: 1000,
+                    },
+                    ReadWriteOperation::Rename {
+                        from: SandboxPath::new("/data/old").unwrap(),
+                        to: SandboxPath::new("/data/new").unwrap(),
+                    },
+                )
+            })
+        };
+
+        let id = wait_for_pending_read_write(&registry);
+        {
+            let registry = registry.lock().unwrap();
+            let pending = registry.pending_read_write.get(&id).unwrap();
+            assert_eq!(pending.path, SandboxPath::new("/data/new").unwrap());
+            assert_eq!(
+                pending.description,
+                "path=/data/old WRITE rename to=/data/new"
+            );
+        }
+        resolve_pending_read_write(&registry, id, PendingDecision::Apply);
+        assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Proceed);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn concurrent_protected_reads_queue_independently() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path);
+        registry
+            .lock()
+            .unwrap()
+            .sandboxes
+            .get_mut("demo")
+            .unwrap()
+            .protect(
+                ProtectionKind::Read,
+                SandboxPath::new("/data/file").unwrap(),
+            );
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let workers: Vec<_> = (0..3)
+            .map(|pid| {
+                let fs = fs.clone();
+                thread::spawn(move || {
+                    fs.authorize_read_write(
+                        RequestIdentity {
+                            pid,
+                            uid: 1000,
+                            gid: 1000,
+                        },
+                        ReadWriteOperation::ReadFile {
+                            path: SandboxPath::new("/data/file").unwrap(),
+                        },
+                    )
+                })
+            })
+            .collect();
+
+        wait_for_pending_read_write_count(&registry, 3);
+        let ids = registry
+            .lock()
+            .unwrap()
+            .pending_read_write
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3);
+        for id in ids {
+            resolve_pending_read_write(&registry, id, PendingDecision::Apply);
+        }
+        for worker in workers {
+            assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Proceed);
+        }
+        writer.shutdown().unwrap();
     }
 
     #[test]
