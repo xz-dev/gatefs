@@ -101,6 +101,12 @@ enum SandboxCommand {
     Deny {
         id: u64,
     },
+    Cancel {
+        id: u64,
+    },
+    CancelAll {
+        mountpoint: Option<String>,
+    },
     Monitor {
         #[arg(short = 'f', long, action = ArgAction::SetTrue)]
         follow: bool,
@@ -265,6 +271,22 @@ fn run_sandbox(runtime: &RuntimePaths, cli: SandboxCli) -> Result<i32> {
                 id,
             },
         )?),
+        SandboxCommand::Cancel { id } => print_response(send(
+            runtime,
+            &name,
+            &Request::Cancel {
+                name: name.clone(),
+                id,
+            },
+        )?),
+        SandboxCommand::CancelAll { mountpoint } => print_response(send(
+            runtime,
+            &name,
+            &Request::CancelAll {
+                name: name.clone(),
+                mountpoint,
+            },
+        )?),
         SandboxCommand::Monitor { follow } => monitor(runtime, &name, follow),
         SandboxCommand::Metadata => print_response(send(
             runtime,
@@ -347,7 +369,10 @@ fn print_response(response: Response) -> Result<i32> {
 fn format_pending_items(items: &[PendingRequest]) -> String {
     items
         .iter()
-        .map(|item| format!("{} {}", item.id(), item.description()))
+        .map(|item| match item.attach_id() {
+            Some(attach_id) => format!("{} attach={} {}", item.id(), attach_id, item.description()),
+            None => format!("{} {}", item.id(), item.description()),
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -829,6 +854,7 @@ mod tests {
             PendingRequest::Metadata(crate::state::PendingMetadataRequest {
                 id: 7,
                 sandbox: "demo".to_string(),
+                attach_id: None,
                 operation: crate::state::MetadataOperation::Chmod {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
@@ -842,6 +868,7 @@ mod tests {
             PendingRequest::Metadata(crate::state::PendingMetadataRequest {
                 id: 8,
                 sandbox: "demo".to_string(),
+                attach_id: Some(7),
                 operation: crate::state::MetadataOperation::Chattr {
                     path: SandboxPath::new("/data/file").unwrap(),
                     flags: crate::state::FS_IMMUTABLE_FL,
@@ -856,7 +883,7 @@ mod tests {
 
         assert_eq!(
             format_pending_items(&items),
-            "7 path=/data/file SETATTR mode=0444\n8 path=/data/file CHATTR flags=0x10"
+            "7 path=/data/file SETATTR mode=0444\n8 attach=7 path=/data/file CHATTR flags=0x10"
         );
     }
 }

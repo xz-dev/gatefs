@@ -33,6 +33,7 @@ fn tui_renders_pending_request_and_controls() {
     let pending = vec![PendingRequest::Metadata(PendingMetadataRequest {
         id: 42,
         sandbox: "demo_tui".to_string(),
+        attach_id: Some(7),
         operation: MetadataOperation::Chmod {
             path: SandboxPath::new("/data/file").unwrap(),
             mode: 0o444,
@@ -50,7 +51,7 @@ fn tui_renders_pending_request_and_controls() {
         .unwrap();
     let lines = buffer_lines(terminal.backend().buffer());
     assert!(lines[0].contains("Operation"));
-    assert!(lines[1].contains("id=42"));
+    assert!(lines[1].contains("id=42 attach=7"));
     assert!(lines[2].contains("path=/data/file"));
     assert!(lines[3].contains("path=/data/file SETATTR mode=0444"));
     let rendered = lines.join("\n");
@@ -59,23 +60,29 @@ fn tui_renders_pending_request_and_controls() {
 
 #[test]
 fn tui_renders_read_write_request_without_edit_control() {
-    let pending = vec![PendingRequest::ReadWrite(PendingReadWriteRequest::new(
-        43,
-        "demo_tui".to_string(),
-        ReadWriteOperation::ReadFile {
-            path: SandboxPath::new("/secret/file").unwrap(),
-        },
-        321,
-        1001,
-        1002,
-    ))];
+    let pending = vec![PendingRequest::ReadWrite(
+        PendingReadWriteRequest::new_with_attach_path(
+            43,
+            "demo_tui".to_string(),
+            Some(8),
+            ReadWriteOperation::ReadFile {
+                path: SandboxPath::new("/secret/file").unwrap(),
+            },
+            SandboxPath::new("/secret/file").unwrap(),
+            sandboxfs::state::RequesterIdentity {
+                pid: 321,
+                uid: 1001,
+                gid: 1002,
+            },
+        ),
+    )];
     let backend = TestBackend::new(100, 12);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| sandboxfs::tui::draw_pending(frame, &pending, 0, "ok"))
         .unwrap();
     let rendered = buffer_lines(terminal.backend().buffer()).join("\n");
-    assert!(rendered.contains("id=43"));
+    assert!(rendered.contains("id=43 attach=8"));
     assert!(rendered.contains("kind=READ"));
     assert!(rendered.contains("path=/secret/file"));
     assert!(rendered.contains("pid=321 uid=1001 gid=1002"));

@@ -350,6 +350,7 @@ fn format_chown_shell_hint(path: &SandboxPath, uid: Option<u32>, gid: Option<u32
 pub struct PendingMetadataRequest {
     pub id: u64,
     pub sandbox: String,
+    pub attach_id: Option<u64>,
     pub operation: MetadataOperation,
     pub kinds: Vec<PendingOperationKind>,
     pub pid: u32,
@@ -372,10 +373,18 @@ impl PendingMetadataRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequesterIdentity {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingReadWriteRequest {
     pub id: u64,
     pub sandbox: String,
+    pub attach_id: Option<u64>,
     pub operation: ReadWriteOperation,
     pub kind: ProtectionKind,
     pub path: SandboxPath,
@@ -407,16 +416,35 @@ impl PendingReadWriteRequest {
         uid: u32,
         gid: u32,
     ) -> Self {
+        Self::new_with_attach_path(
+            id,
+            sandbox,
+            None,
+            operation,
+            path,
+            RequesterIdentity { pid, uid, gid },
+        )
+    }
+
+    pub fn new_with_attach_path(
+        id: u64,
+        sandbox: String,
+        attach_id: Option<u64>,
+        operation: ReadWriteOperation,
+        path: SandboxPath,
+        requester: RequesterIdentity,
+    ) -> Self {
         Self {
             id,
             sandbox,
+            attach_id,
             kind: operation.kind(),
             path,
             description: operation.description(),
             operation,
-            pid,
-            uid,
-            gid,
+            pid: requester.pid,
+            uid: requester.uid,
+            gid: requester.gid,
         }
     }
 }
@@ -440,6 +468,13 @@ impl PendingRequest {
         match self {
             Self::Metadata(request) => &request.sandbox,
             Self::ReadWrite(request) => &request.sandbox,
+        }
+    }
+
+    pub fn attach_id(&self) -> Option<u64> {
+        match self {
+            Self::Metadata(request) => request.attach_id,
+            Self::ReadWrite(request) => request.attach_id,
         }
     }
 
@@ -470,6 +505,7 @@ pub enum PendingDecision {
     Apply,
     DoNothing,
     Deny,
+    Cancel,
 }
 
 pub type PendingWaiter = Arc<(Mutex<Option<PendingDecision>>, Condvar)>;
@@ -494,6 +530,7 @@ pub struct TrustedOperation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachMount {
+    pub id: u64,
     pub mountpoint: PathBuf,
     pub temporary: bool,
     #[serde(skip)]
@@ -1236,6 +1273,7 @@ mod tests {
         registry.insert_pending_request(PendingMetadataRequest {
             id: 2,
             sandbox: "s".to_string(),
+            attach_id: None,
             operation: metadata_operation.clone(),
             kinds: metadata_operation.pending_kinds(),
             pid: 123,

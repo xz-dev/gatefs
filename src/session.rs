@@ -18,17 +18,25 @@ use crate::log;
 use crate::path::SandboxPath;
 use crate::runtime::RuntimePaths;
 use crate::state::{
-    AttachMount, PendingDecision, PendingRequest, ProtectionKind, Sandbox, SandboxRegistry,
-    TrustedOperation, TrustedPathScope,
+    AttachMount, PendingDecision, PendingRequest, PendingWaiter, ProtectionKind, Sandbox,
+    SandboxRegistry, TrustedOperation, TrustedPathScope,
 };
 use crate::{Error, Result};
 
 #[derive(Debug)]
 pub struct MountedSession {
     pub sandbox: String,
+    pub attach_id: u64,
     pub mountpoint: PathBuf,
     pub temporary: bool,
     pub session: fuser::BackgroundSession,
+}
+
+struct CanceledPending {
+    id: u64,
+    event_id: u64,
+    attach_id: Option<u64>,
+    waiter: Option<PendingWaiter>,
 }
 
 #[derive(Debug)]
@@ -136,39 +144,27 @@ impl SessionState {
                 do_nothing,
             } => self.allow(&name, id, do_nothing),
             Request::Deny { name, id } => self.deny(&name, id),
+            Request::Cancel { name, id } => self.cancel(&name, id, "explicit"),
+            Request::CancelAll { name, mountpoint } => {
+                self.cancel_all(&name, mountpoint.as_deref())
+            }
             Request::LogPath { name } => self.log_path(&name),
         }
     }
 
     pub fn destroy(&self, name: &str) -> Result<Response> {
-        let (mountpoints, waiters) = {
+        let mountpoints = {
             let mut registry = self.registry.lock().unwrap();
             let Some(sandbox) = registry.sandboxes.get(name) else {
                 return Err(Error::msg(format!("sandbox not found: {name}")));
             };
             let mountpoints: Vec<PathBuf> = sandbox.attaches.keys().cloned().collect();
-            let removed_pending: Vec<u64> = registry
-                .pending_requests_for_sandbox(name)
-                .into_iter()
-                .map(|pending| pending.id())
-                .collect();
-            let mut waiters = Vec::new();
-            for id in removed_pending {
-                registry.remove_any_pending_request(id);
-                if let Some(waiter) = registry.pending_waiters.remove(&id) {
-                    waiters.push(waiter);
-                }
-            }
             registry
                 .trusted
                 .retain(|_, trusted| trusted.sandbox != name);
-            (mountpoints, waiters)
+            mountpoints
         };
-        for waiter in waiters {
-            let (lock, cvar) = &*waiter;
-            *lock.lock().unwrap() = Some(PendingDecision::Deny);
-            cvar.notify_all();
-        }
+        let _ = self.cancel_all(name, None);
         for mountpoint in mountpoints {
             self.detach(name, &mountpoint)?;
         }
@@ -203,8 +199,21 @@ impl SessionState {
             }
         }
 
-        let fs = SandboxFs::new(
+        let (attach_id, attach_event_id, log_path) = {
+            let mut registry = self.registry.lock().unwrap();
+            let attach_id = registry.next_operation_id();
+            let attach_event_id = registry.next_operation_id();
+            let log_path = registry
+                .sandboxes
+                .get(name)
+                .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?
+                .log_path
+                .clone();
+            (attach_id, attach_event_id, log_path)
+        };
+        let fs = SandboxFs::new_with_attach_id(
             name.to_string(),
+            Some(attach_id),
             Arc::clone(&self.registry),
             self.log_writer.clone(),
         );
@@ -217,6 +226,7 @@ impl SessionState {
         let session = fuser::spawn_mount2(fs, &mountpoint, &config)?;
         self.mounts.lock().unwrap().push(MountedSession {
             sandbox: name.to_string(),
+            attach_id,
             mountpoint: mountpoint.clone(),
             temporary,
             session,
@@ -229,45 +239,70 @@ impl SessionState {
         sandbox.attaches.insert(
             mountpoint.clone(),
             AttachMount {
+                id: attach_id,
                 mountpoint: mountpoint.clone(),
                 temporary,
                 active: true,
             },
         );
+        self.log_writer.append(
+            &log_path,
+            log::format_log_line(
+                attach_event_id,
+                &format!(
+                    "attach attach={attach_id} mountpoint={}",
+                    mountpoint.display()
+                ),
+            ),
+        )?;
         Ok(Response::Ok)
     }
 
     fn detach(&self, name: &str, mountpoint: &Path) -> Result<Response> {
         let mountpoint = canonicalize_maybe_existing(mountpoint)?;
-        {
+        let (attach_id, log_path) = {
             let registry = self.registry.lock().unwrap();
             let sandbox = registry
                 .sandboxes
                 .get(name)
                 .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?;
-            if !sandbox.attaches.contains_key(&mountpoint) {
+            let Some(attach) = sandbox.attaches.get(&mountpoint) else {
                 return Err(Error::msg(format!(
                     "mountpoint is not attached to sandbox {name}: {}",
                     mountpoint.display()
                 )));
-            }
-        }
+            };
+            (attach.id, sandbox.log_path.clone())
+        };
+        let _ = self.cancel_attached_view(name, attach_id, "detach");
 
         let session = {
             let mut mounts = self.mounts.lock().unwrap();
             let idx = mounts
                 .iter()
-                .position(|mounted| mounted.sandbox == name && mounted.mountpoint == mountpoint)
+                .position(|mounted| {
+                    mounted.sandbox == name
+                        && mounted.attach_id == attach_id
+                        && mounted.mountpoint == mountpoint
+                })
                 .ok_or_else(|| {
                     Error::msg(format!("mount session not found: {}", mountpoint.display()))
                 })?;
             mounts.remove(idx)
         };
         session.session.umount_and_join()?;
-        let mut registry = self.registry.lock().unwrap();
-        if let Some(sandbox) = registry.sandboxes.get_mut(name) {
-            sandbox.attaches.remove(&mountpoint);
-        }
+        let detach_event_id = {
+            let mut registry = self.registry.lock().unwrap();
+            let detach_event_id = registry.next_operation_id();
+            if let Some(sandbox) = registry.sandboxes.get_mut(name) {
+                sandbox.attaches.remove(&mountpoint);
+            }
+            detach_event_id
+        };
+        self.log_writer.append(
+            &log_path,
+            log::format_log_line(detach_event_id, &format!("detach attach={attach_id}")),
+        )?;
         Ok(Response::Ok)
     }
 
@@ -520,12 +555,16 @@ impl SessionState {
                 .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?;
             sandbox.apply_metadata_override(&pending.operation)?;
         }
+        let attach_field = pending
+            .attach_id()
+            .map(|id| format!(" attach={id}"))
+            .unwrap_or_default();
         let log_result = self.log_writer.append(
             &log_path,
             log::format_log_line(
                 decision_id,
                 &format!(
-                    "decision request={id} {}",
+                    "decision request={id}{attach_field} {}",
                     if do_nothing {
                         "ALLOW_DO_NOTHING"
                     } else {
@@ -565,11 +604,204 @@ impl SessionState {
             .log_path
             .clone();
         let waiter = registry.pending_waiters.remove(&id);
+        let attach_field = pending
+            .attach_id()
+            .map(|id| format!(" attach={id}"))
+            .unwrap_or_default();
         let log_result = self.log_writer.append(
             &log_path,
-            log::format_log_line(decision_id, &format!("decision request={id} DENY")),
+            log::format_log_line(
+                decision_id,
+                &format!("decision request={id}{attach_field} DENY"),
+            ),
         );
         notify_pending_waiter(waiter, PendingDecision::Deny);
+        log_result?;
+        Ok(Response::Ok)
+    }
+
+    fn cancel(&self, name: &str, id: u64, reason: &str) -> Result<Response> {
+        let (event_id, log_path, waiter, attach_id) = {
+            let mut registry = self.registry.lock().unwrap();
+            let pending = registry
+                .remove_any_pending_request(id)
+                .ok_or_else(|| Error::msg(format!("pending operation not found: {id}")))?;
+            if pending.sandbox() != name {
+                registry.insert_any_pending_request(pending);
+                return Err(Error::msg(format!(
+                    "pending operation {id} does not belong to sandbox {name}"
+                )));
+            }
+            let attach_id = pending.attach_id();
+            let event_id = registry.next_operation_id();
+            let log_path = registry
+                .sandboxes
+                .get(name)
+                .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?
+                .log_path
+                .clone();
+            let waiter = registry.pending_waiters.remove(&id);
+            (event_id, log_path, waiter, attach_id)
+        };
+        let attach_field = attach_id
+            .map(|id| format!(" attach={id}"))
+            .unwrap_or_default();
+        let log_result = self.log_writer.append(
+            &log_path,
+            log::format_log_line(
+                event_id,
+                &format!("cancel request={id}{attach_field} reason={reason}"),
+            ),
+        );
+        notify_pending_waiter(waiter, PendingDecision::Cancel);
+        log_result?;
+        Ok(Response::Ok)
+    }
+
+    fn cancel_all(&self, name: &str, mountpoint: Option<&str>) -> Result<Response> {
+        if let Some(mountpoint) = mountpoint {
+            let mountpoint = canonicalize_maybe_existing(Path::new(mountpoint))?;
+            let attach_id = {
+                let registry = self.registry.lock().unwrap();
+                let sandbox = registry
+                    .sandboxes
+                    .get(name)
+                    .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?;
+                let Some(attach) = sandbox.attaches.get(&mountpoint) else {
+                    return Err(Error::msg(format!(
+                        "mountpoint is not attached to sandbox {name}: {}",
+                        mountpoint.display()
+                    )));
+                };
+                attach.id
+            };
+            return self.cancel_attached_view(name, attach_id, "cancel-all");
+        }
+
+        let (scope_event_id, log_path, canceled) = {
+            let mut registry = self.registry.lock().unwrap();
+            let log_path = registry
+                .sandboxes
+                .get(name)
+                .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?
+                .log_path
+                .clone();
+            let ids: Vec<u64> = registry
+                .pending_requests_for_sandbox(name)
+                .into_iter()
+                .map(|pending| pending.id())
+                .collect();
+            let scope_event_id = registry.next_operation_id();
+            let mut canceled = Vec::new();
+            for id in ids {
+                let attach_id = registry
+                    .remove_any_pending_request(id)
+                    .and_then(|pending| pending.attach_id());
+                let waiter = registry.pending_waiters.remove(&id);
+                let event_id = registry.next_operation_id();
+                canceled.push(CanceledPending {
+                    id,
+                    event_id,
+                    attach_id,
+                    waiter,
+                });
+            }
+            (scope_event_id, log_path, canceled)
+        };
+        self.finish_cancel_scope(
+            scope_event_id,
+            log_path,
+            canceled,
+            "sandbox",
+            None,
+            "cancel-all",
+        )
+    }
+
+    fn cancel_attached_view(&self, name: &str, attach_id: u64, reason: &str) -> Result<Response> {
+        let (scope_event_id, log_path, canceled) = {
+            let mut registry = self.registry.lock().unwrap();
+            let log_path = registry
+                .sandboxes
+                .get(name)
+                .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?
+                .log_path
+                .clone();
+            let ids: Vec<u64> = registry
+                .pending_requests_for_sandbox(name)
+                .into_iter()
+                .filter(|pending| pending.attach_id() == Some(attach_id))
+                .map(|pending| pending.id())
+                .collect();
+            let scope_event_id = registry.next_operation_id();
+            let mut canceled = Vec::new();
+            for id in ids {
+                registry.remove_any_pending_request(id);
+                let waiter = registry.pending_waiters.remove(&id);
+                let event_id = registry.next_operation_id();
+                canceled.push(CanceledPending {
+                    id,
+                    event_id,
+                    attach_id: Some(attach_id),
+                    waiter,
+                });
+            }
+            (scope_event_id, log_path, canceled)
+        };
+        self.finish_cancel_scope(
+            scope_event_id,
+            log_path,
+            canceled,
+            "attached-view",
+            Some(attach_id),
+            reason,
+        )
+    }
+
+    fn finish_cancel_scope(
+        &self,
+        scope_event_id: u64,
+        log_path: PathBuf,
+        canceled: Vec<CanceledPending>,
+        scope: &str,
+        attach_id: Option<u64>,
+        reason: &str,
+    ) -> Result<Response> {
+        let attach_field = attach_id
+            .map(|id| format!(" attach={id}"))
+            .unwrap_or_default();
+        let mut log_result = self.log_writer.append(
+            &log_path,
+            log::format_log_line(
+                scope_event_id,
+                &format!(
+                    "cancel{attach_field} scope={scope} reason={reason} count={}",
+                    canceled.len()
+                ),
+            ),
+        );
+        for item in &canceled {
+            let item_attach_field = item
+                .attach_id
+                .map(|id| format!(" attach={id}"))
+                .unwrap_or_default();
+            let item_result = self.log_writer.append(
+                &log_path,
+                log::format_log_line(
+                    item.event_id,
+                    &format!(
+                        "cancel request={}{} reason={reason}",
+                        item.id, item_attach_field
+                    ),
+                ),
+            );
+            if log_result.is_ok() && item_result.is_err() {
+                log_result = item_result;
+            }
+        }
+        for item in canceled {
+            notify_pending_waiter(item.waiter, PendingDecision::Cancel);
+        }
         log_result?;
         Ok(Response::Ok)
     }
@@ -953,6 +1185,216 @@ mod tests {
     }
 
     #[test]
+    fn cancel_logs_and_notifies_metadata_request() {
+        let (_temp, session, _writer, waiter) = session_with_pending_request_and_writer();
+
+        match session.handle(Request::Cancel {
+            name: "a".to_string(),
+            id: 1,
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let data = log::read_log(&session.runtime.sandbox_log_path("a")).unwrap();
+        assert!(data.contains(" id=2 cancel request=1 reason=explicit"));
+        assert_waiter_decision(&waiter, PendingDecision::Cancel);
+        assert_no_pending_request(&session);
+    }
+
+    #[test]
+    fn cancel_logs_and_notifies_read_write_request() {
+        let (_temp, session, _writer, waiter) =
+            session_with_pending_read_write_request_and_writer();
+
+        match session.handle(Request::Cancel {
+            name: "a".to_string(),
+            id: 1,
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let data = log::read_log(&session.runtime.sandbox_log_path("a")).unwrap();
+        assert!(data.contains(" id=2 cancel request=1 reason=explicit"));
+        assert_waiter_decision(&waiter, PendingDecision::Cancel);
+        assert_no_pending_read_write_request(&session);
+    }
+
+    #[test]
+    fn cancel_all_logs_and_notifies_metadata_and_read_write_requests() {
+        let temp = TempDir::new().unwrap();
+        let runtime = RuntimePaths::for_tests(temp.path().to_path_buf(), None);
+        let writer = log::LogWriter::new();
+        let writer_handle = writer.handle();
+        let session = SessionState::with_log_writer(runtime, writer_handle, None);
+        session.create_initial("a").unwrap();
+        let metadata_waiter: crate::state::PendingWaiter =
+            Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+        let read_write_waiter: crate::state::PendingWaiter =
+            Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+        {
+            let mut registry = session.registry.lock().unwrap();
+            registry.insert_pending_request(crate::state::PendingMetadataRequest {
+                id: 1,
+                sandbox: "a".to_string(),
+                attach_id: None,
+                operation: crate::state::MetadataOperation::Chmod {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                    mode: 0o444,
+                },
+                kinds: vec![crate::state::PendingOperationKind::Mode],
+                pid: 123,
+                uid: 1000,
+                gid: 1000,
+                description: "path=/data/file SETATTR mode=0444".to_string(),
+            });
+            registry.insert_pending_read_write_request(crate::state::PendingReadWriteRequest::new(
+                2,
+                "a".to_string(),
+                crate::state::ReadWriteOperation::ReadFile {
+                    path: SandboxPath::new("/data/secret").unwrap(),
+                },
+                124,
+                1000,
+                1000,
+            ));
+            registry
+                .pending_waiters
+                .insert(1, Arc::clone(&metadata_waiter));
+            registry
+                .pending_waiters
+                .insert(2, Arc::clone(&read_write_waiter));
+            registry.next_operation_id = 3;
+        }
+
+        match session.handle(Request::CancelAll {
+            name: "a".to_string(),
+            mountpoint: None,
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let data = log::read_log(&session.runtime.sandbox_log_path("a")).unwrap();
+        assert!(data.contains(" id=3 cancel scope=sandbox reason=cancel-all count=2"));
+        assert!(data.contains(" id=4 cancel request=1 reason=cancel-all"));
+        assert!(data.contains(" id=5 cancel request=2 reason=cancel-all"));
+        assert_waiter_decision(&metadata_waiter, PendingDecision::Cancel);
+        assert_waiter_decision(&read_write_waiter, PendingDecision::Cancel);
+        let registry = session.registry.lock().unwrap();
+        assert!(registry.pending.is_empty());
+        assert!(registry.pending_read_write.is_empty());
+        assert!(registry.pending_waiters.is_empty());
+        assert!(registry.pending_index.is_empty());
+    }
+
+    #[test]
+    fn cancel_all_mountpoint_scope_cancels_only_matching_attach_requests() {
+        let temp = TempDir::new().unwrap();
+        let mountpoint = temp.path().join("mnt");
+        fs::create_dir(&mountpoint).unwrap();
+        let runtime = RuntimePaths::for_tests(temp.path().to_path_buf(), None);
+        let writer = log::LogWriter::new();
+        let writer_handle = writer.handle();
+        let session = SessionState::with_log_writer(runtime, writer_handle, None);
+        session.create_initial("a").unwrap();
+        let matching_waiter: crate::state::PendingWaiter =
+            Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+        let other_attach_waiter: crate::state::PendingWaiter =
+            Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+        let no_attach_waiter: crate::state::PendingWaiter =
+            Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+        {
+            let mut registry = session.registry.lock().unwrap();
+            let sandbox = registry.sandboxes.get_mut("a").unwrap();
+            sandbox.attaches.insert(
+                mountpoint.clone(),
+                AttachMount {
+                    id: 7,
+                    mountpoint: mountpoint.clone(),
+                    temporary: false,
+                    active: true,
+                },
+            );
+            registry.insert_pending_request(crate::state::PendingMetadataRequest {
+                id: 1,
+                sandbox: "a".to_string(),
+                attach_id: Some(7),
+                operation: crate::state::MetadataOperation::Chmod {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                    mode: 0o444,
+                },
+                kinds: vec![crate::state::PendingOperationKind::Mode],
+                pid: 123,
+                uid: 1000,
+                gid: 1000,
+                description: "path=/data/file SETATTR mode=0444".to_string(),
+            });
+            registry.insert_pending_read_write_request(
+                crate::state::PendingReadWriteRequest::new_with_attach_path(
+                    2,
+                    "a".to_string(),
+                    Some(8),
+                    crate::state::ReadWriteOperation::ReadFile {
+                        path: SandboxPath::new("/data/other").unwrap(),
+                    },
+                    SandboxPath::new("/data/other").unwrap(),
+                    crate::state::RequesterIdentity {
+                        pid: 124,
+                        uid: 1000,
+                        gid: 1000,
+                    },
+                ),
+            );
+            registry.insert_pending_read_write_request(crate::state::PendingReadWriteRequest::new(
+                3,
+                "a".to_string(),
+                crate::state::ReadWriteOperation::ReadFile {
+                    path: SandboxPath::new("/data/no-attach").unwrap(),
+                },
+                125,
+                1000,
+                1000,
+            ));
+            registry
+                .pending_waiters
+                .insert(1, Arc::clone(&matching_waiter));
+            registry
+                .pending_waiters
+                .insert(2, Arc::clone(&other_attach_waiter));
+            registry
+                .pending_waiters
+                .insert(3, Arc::clone(&no_attach_waiter));
+            registry.next_operation_id = 9;
+        }
+
+        match session.handle(Request::CancelAll {
+            name: "a".to_string(),
+            mountpoint: Some(mountpoint.display().to_string()),
+        }) {
+            Response::Ok => {}
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let data = log::read_log(&session.runtime.sandbox_log_path("a")).unwrap();
+        assert!(
+            data.contains(" id=9 cancel attach=7 scope=attached-view reason=cancel-all count=1")
+        );
+        assert!(data.contains(" id=10 cancel request=1 attach=7 reason=cancel-all"));
+        assert_waiter_decision(&matching_waiter, PendingDecision::Cancel);
+        assert_eq!(*other_attach_waiter.0.lock().unwrap(), None);
+        assert_eq!(*no_attach_waiter.0.lock().unwrap(), None);
+        let registry = session.registry.lock().unwrap();
+        assert!(!registry.pending.contains_key(&1));
+        assert!(registry.pending_read_write.contains_key(&2));
+        assert!(registry.pending_read_write.contains_key(&3));
+        assert!(!registry.pending_waiters.contains_key(&1));
+        assert!(registry.pending_waiters.contains_key(&2));
+        assert!(registry.pending_waiters.contains_key(&3));
+    }
+
+    #[test]
     fn concurrent_pending_views_do_not_consume_request() {
         let (_temp, session, writer, waiter) = session_with_pending_request_and_writer();
         let session = Arc::new(session);
@@ -998,7 +1440,7 @@ mod tests {
         let writer_handle = writer.handle();
         let session = SessionState::with_log_writer(runtime, writer_handle, None);
         session.create_initial("a").unwrap();
-        let waiters: Vec<_> = (1..=3)
+        let waiters: Vec<_> = (1..=4)
             .map(|_| Arc::new((Mutex::new(None), std::sync::Condvar::new())))
             .collect();
         {
@@ -1039,6 +1481,7 @@ mod tests {
                 registry.insert_pending_request(crate::state::PendingMetadataRequest {
                     id,
                     sandbox: "a".to_string(),
+                    attach_id: None,
                     description: operation.event_body(),
                     operation,
                     kinds,
@@ -1050,6 +1493,17 @@ mod tests {
                     .pending_waiters
                     .insert(id, Arc::clone(&waiters[(id - 1) as usize]));
             }
+            registry.insert_pending_read_write_request(crate::state::PendingReadWriteRequest::new(
+                4,
+                "a".to_string(),
+                crate::state::ReadWriteOperation::ReadFile {
+                    path: SandboxPath::new("/data/file").unwrap(),
+                },
+                123,
+                1000,
+                1000,
+            ));
+            registry.pending_waiters.insert(4, Arc::clone(&waiters[3]));
         }
 
         match session.handle(Request::Shutdown {
@@ -1060,10 +1514,11 @@ mod tests {
         }
 
         for waiter in &waiters {
-            assert_waiter_decision(waiter, PendingDecision::Deny);
+            assert_waiter_decision(waiter, PendingDecision::Cancel);
         }
         let registry = session.registry.lock().unwrap();
         assert!(registry.pending.is_empty());
+        assert!(registry.pending_read_write.is_empty());
         assert!(registry.pending_waiters.is_empty());
         assert!(registry.pending_index.is_empty());
     }
@@ -1089,6 +1544,7 @@ mod tests {
             registry.insert_pending_request(crate::state::PendingMetadataRequest {
                 id: 2,
                 sandbox: "a".to_string(),
+                attach_id: None,
                 operation: crate::state::MetadataOperation::Chmod {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
@@ -1147,6 +1603,7 @@ mod tests {
             registry.insert_pending_request(crate::state::PendingMetadataRequest {
                 id: 2,
                 sandbox: "a".to_string(),
+                attach_id: None,
                 operation: crate::state::MetadataOperation::Chmod {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
@@ -1214,6 +1671,7 @@ mod tests {
             registry.insert_pending_request(crate::state::PendingMetadataRequest {
                 id: 1,
                 sandbox: "a".to_string(),
+                attach_id: None,
                 operation: crate::state::MetadataOperation::Chmod {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,

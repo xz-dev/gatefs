@@ -57,6 +57,19 @@ fn session_log(session: &RunningSession) -> String {
     fs::read_to_string(session.log_dir().join(format!("{}.log", session.name))).unwrap()
 }
 
+fn wait_for_log_line(session: &RunningSession, parts: &[&str]) -> String {
+    let mut log = String::new();
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            log = session_log(session);
+            log.lines()
+                .any(|line| parts.iter().all(|part| line.contains(part)))
+        }),
+        "log did not contain line with {parts:?}:\n{log}"
+    );
+    log
+}
+
 fn assert_log_line_contains(log: &str, parts: &[&str]) {
     assert!(
         log.lines()
@@ -100,6 +113,53 @@ fn pending_ids(output: &str) -> Vec<String> {
         .filter_map(|line| line.split_whitespace().next())
         .map(ToString::to_string)
         .collect()
+}
+
+#[test]
+#[ignore]
+fn attach_and_detach_log_lifecycle_events() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_attach_detach_log");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&mountpoint).unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+    let log = wait_for_log_line(&session, &[" id=", " attach ", " attach=", "mountpoint="]);
+    let attach_id = log
+        .lines()
+        .find_map(|line| {
+            if line.contains(" attach ") && line.contains("mountpoint=") {
+                line.split_whitespace()
+                    .find_map(|part| part.strip_prefix("attach="))
+            } else {
+                None
+            }
+        })
+        .expect("attach id in log")
+        .to_string();
+
+    session
+        .sandbox_cmd()
+        .args(["detach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+    let log = wait_for_log_line(
+        &session,
+        &[" id=", " detach ", &format!("attach={attach_id}")],
+    );
+    assert_log_line_contains(&log, &[" detach ", &format!("attach={attach_id}")]);
+    assert!(
+        !log.lines()
+            .any(|line| line.contains(" detach ")
+                && line.contains(&mountpoint.display().to_string()))
+    );
 }
 
 #[test]

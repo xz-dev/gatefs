@@ -86,6 +86,14 @@ pub enum Request {
         name: String,
         id: u64,
     },
+    Cancel {
+        name: String,
+        id: u64,
+    },
+    CancelAll {
+        name: String,
+        mountpoint: Option<String>,
+    },
     LogPath {
         name: String,
     },

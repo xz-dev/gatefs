@@ -201,10 +201,16 @@ pub fn draw_pending(
 
 fn format_pending_row(pending: &PendingRequest) -> String {
     match pending {
-        PendingRequest::Metadata(request) => format!("id={} {}", request.id, request.description),
-        PendingRequest::ReadWrite(request) => format!(
-            "id={} {} path={} {} pid={} uid={} gid={}",
+        PendingRequest::Metadata(request) => format!(
+            "id={}{} {}",
             request.id,
+            format_attach_suffix(request.attach_id),
+            request.description
+        ),
+        PendingRequest::ReadWrite(request) => format!(
+            "id={}{} {} path={} {} pid={} uid={} gid={}",
+            request.id,
+            format_attach_suffix(request.attach_id),
             request.kind,
             request.path,
             request.description,
@@ -218,14 +224,16 @@ fn format_pending_row(pending: &PendingRequest) -> String {
 fn format_selected_pending(pending: &PendingRequest) -> String {
     match pending {
         PendingRequest::Metadata(request) => format!(
-            "id={}\npath={}\n{}",
+            "id={}{}\npath={}\n{}",
             request.id,
+            format_attach_suffix(request.attach_id),
             request.operation.path(),
             request.description
         ),
         PendingRequest::ReadWrite(request) => format!(
-            "id={}\nkind={}\npath={}\npid={} uid={} gid={}\n{}",
+            "id={}{}\nkind={}\npath={}\npid={} uid={} gid={}\n{}",
             request.id,
+            format_attach_suffix(request.attach_id),
             request.kind,
             request.path,
             request.pid,
@@ -234,6 +242,12 @@ fn format_selected_pending(pending: &PendingRequest) -> String {
             request.description
         ),
     }
+}
+
+fn format_attach_suffix(attach_id: Option<u64>) -> String {
+    attach_id
+        .map(|id| format!(" attach={id}"))
+        .unwrap_or_default()
 }
 
 pub fn edit_pending_command(name: &str, id: u64, current_command: &str) -> Result<String> {
