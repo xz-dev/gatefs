@@ -164,6 +164,37 @@ fn attach_and_detach_log_lifecycle_events() {
 
 #[test]
 #[ignore]
+fn attach_readlink_passthrough() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_readlink");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    std::os::unix::fs::symlink("target-file", local.join("link")).unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_link(mountpoint.join("data/link")).unwrap(),
+        Path::new("target-file")
+    );
+}
+
+#[test]
+#[ignore]
 fn attach_read_and_read_only_write_error() {
     require_fuse();
     if !fuse_enabled() {

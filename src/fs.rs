@@ -595,6 +595,26 @@ impl Filesystem for SandboxFs {
         }
     }
 
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let Some(path) = self.path_for_ino(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let registry = self.registry.lock().unwrap();
+        let Some(sandbox) = registry.sandboxes.get(&self.sandbox_name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match sandbox.resolve(&path) {
+            Some(ResolvedPath::Real { local_path, .. }) => match std::fs::read_link(local_path) {
+                Ok(target) => reply.data(target.as_os_str().as_bytes()),
+                Err(err) => reply.error(io_to_errno(err)),
+            },
+            Some(ResolvedPath::VirtualDir { .. }) => reply.error(Errno::EINVAL),
+            None => reply.error(Errno::ENOENT),
+        }
+    }
+
     fn readdir(
         &self,
         req: &Request,
