@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Minimal demo wrapper: run `pi` inside a bubblewrap root backed by sandboxfs.
+# Minimal demo wrapper: run pi inside a bubblewrap root backed by sandboxfs.
 #
-# Shape of the sandboxfs view:
-#   - start from the host root (`sandboxfs mount / /`);
-#   - hide /home, so other users' /home details are not visible;
-#   - hide $HOME, then re-expose only $PWD and $HOME/.pi;
-#   - re-expose every existing PATH directory and protect writes on each exposed
-#     tree;
-#   - use bwrap to make the sandboxfs attach point the process root.
-#
-# bwrap inherits the caller's environment by default. This wrapper only replaces
-# PATH with the sanitized list of PATH directories that were mounted into the
-# sandboxfs view. All arguments are passed through to pi unchanged.
+# The sandboxfs view starts from host /, hides /home and $HOME, then re-exposes
+# only the current working directory and $HOME/.pi. The wrapped process inherits
+# the caller's environment; this script only replaces PATH with a small system
+# PATH so hidden home PATH entries are not accidentally re-exposed.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 HOST_CWD=$(pwd -P)
 HOST_HOME=${HOME:?HOME must be set}
+SANDBOXED_PATH=${PI_SANDBOX_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
 
 require_executable() {
     local name=$1
@@ -42,6 +36,21 @@ resolve_sandboxfs() {
     fi
 }
 
+resolve_pi() {
+    if [[ -n ${PI_BIN:-} ]]; then
+        printf '%s\n' "$PI_BIN"
+    elif [[ -e /bin/pi ]]; then
+        printf '/bin/pi\n'
+    elif [[ -e /usr/bin/pi ]]; then
+        printf '/usr/bin/pi\n'
+    elif command -v pi >/dev/null 2>&1; then
+        command -v pi
+    else
+        printf 'pi-sandbox: pi not found. Set PI_BIN or install pi.\n' >&2
+        exit 127
+    fi
+}
+
 clean_abs_path() {
     local path=$1
     if [[ $path != /* ]]; then
@@ -61,28 +70,19 @@ canonical_dir() {
     (cd -- "$path" && pwd -P)
 }
 
-canonical_path() {
+protect_tree_pattern() {
     local path=$1
-    readlink -f -- "$path" 2>/dev/null || printf '%s\n' "$path"
-}
-
-join_path() {
-    local IFS=:
-    printf '%s' "$*"
+    if [[ $path == / ]]; then
+        printf '/**\n'
+    else
+        printf '%s/**\n' "$path"
+    fi
 }
 
 BWRAP_BIN=${BWRAP_BIN:-bwrap}
 require_executable "$BWRAP_BIN"
-
 SANDBOXFS_BIN=$(resolve_sandboxfs)
-PI_BIN=${PI_BIN:-}
-if [[ -z $PI_BIN ]]; then
-    require_executable pi
-    PI_BIN=$(command -v pi)
-elif [[ $PI_BIN != /* ]]; then
-    require_executable "$PI_BIN"
-    PI_BIN=$(command -v "$PI_BIN")
-fi
+PI_BIN=$(resolve_pi)
 
 TMP_ROOT=$(mktemp -d -p /tmp pi-sandbox.XXXXXXXXXX)
 RUNTIME_DIR=$TMP_ROOT/run
@@ -144,18 +144,6 @@ if [[ ! -S $SOCKET ]]; then
 fi
 
 declare -A SCAFFOLD_MOUNTS=()
-declare -A ADDED_TREES=()
-declare -A ADDED_FILES=()
-BWRAP_RO_BINDS=()
-
-protect_tree_pattern() {
-    local path=$1
-    if [[ $path == / ]]; then
-        printf '/**\n'
-    else
-        printf '%s/**\n' "$path"
-    fi
-}
 
 add_scaffold_mount() {
     local sandbox_path=$1
@@ -197,45 +185,13 @@ add_write_protected_tree() {
         printf 'pi-sandbox: warning: skipping missing directory: %s\n' "$local_path" >&2
         return 0
     fi
-    [[ -n ${ADDED_TREES[$sandbox_path]+set} ]] && return 0
 
     ensure_hidden_path_ancestors "$sandbox_path"
     sf mount "$local_path" "$sandbox_path"
     sf protect-write "$(protect_tree_pattern "$sandbox_path")"
-    ADDED_TREES[$sandbox_path]=1
 }
 
-add_write_protected_file() {
-    local local_path=$1
-    local sandbox_path=$2
-    sandbox_path=$(clean_abs_path "$sandbox_path")
-
-    if [[ ! -f $local_path ]]; then
-        return 0
-    fi
-    [[ -n ${ADDED_FILES[$sandbox_path]+set} ]] && return 0
-
-    sf mount "$local_path" "$sandbox_path"
-    sf protect-write "$sandbox_path"
-    ADDED_FILES[$sandbox_path]=1
-}
-
-add_symlink_dir_mount() {
-    local sandbox_path=$1
-    if [[ -L $sandbox_path && -d $sandbox_path ]]; then
-        add_write_protected_tree "$(canonical_dir "$sandbox_path")" "$sandbox_path"
-    fi
-}
-
-add_bwrap_ro_bind_dir() {
-    local source_path=$1
-    local sandbox_path=$2
-    if [[ -d $source_path ]]; then
-        BWRAP_RO_BINDS+=(--ro-bind "$source_path" "$sandbox_path")
-    fi
-}
-
-# Base view: root redirect, with home details hidden until explicitly re-added.
+# Base view: root redirect, then hide home details until explicitly re-added.
 sf mount / /
 sf hide /home
 sf hide "$HOST_HOME"
@@ -249,57 +205,21 @@ else
     printf 'pi-sandbox: warning: %s does not exist; pi config may be unavailable\n' "$PI_HOME_DIR" >&2
 fi
 
-# sandboxfs currently lacks readlink support. Mount common symlinked executable
-# and loader paths as real directories so shebangs and dynamic executables can
-# start inside the sandboxfs root.
-for compat_dir in /bin /sbin /lib /lib64 /usr/lib64; do
-    add_symlink_dir_mount "$compat_dir"
-done
-
-# Dynamic library sonames are often symlinks. These read-only bwrap overlays are
-# execution support, not part of the sandboxfs write-authorization surface.
-for lib_dir in /usr/lib /usr/lib64 /lib /lib64 /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu; do
-    if [[ -d $lib_dir ]]; then
-        add_bwrap_ro_bind_dir "$(canonical_dir "$lib_dir")" "$lib_dir"
-    fi
-done
-
-# Re-expose every existing PATH directory and use a sanitized absolute PATH
-# inside bwrap. All other environment variables are inherited from the caller.
-declare -A PATH_SEEN=()
-SANDBOX_PATH_PARTS=()
-IFS=: read -r -a HOST_PATH_PARTS <<< "${PATH:-}"
-for entry in "${HOST_PATH_PARTS[@]}"; do
-    if [[ -z $entry ]]; then
-        entry=$HOST_CWD
-    elif [[ $entry != /* ]]; then
-        entry=$HOST_CWD/$entry
-    fi
-    entry=$(clean_abs_path "$entry")
-    if [[ ! -d $entry ]]; then
-        continue
-    fi
-    [[ -n ${PATH_SEEN[$entry]+set} ]] && continue
-    PATH_SEEN[$entry]=1
-    SANDBOX_PATH_PARTS+=("$entry")
-    add_write_protected_tree "$(canonical_dir "$entry")" "$entry"
-done
-SANDBOXED_PATH=$(join_path "${SANDBOX_PATH_PARTS[@]}")
-
-PI_BIN_PARENT=$(clean_abs_path "$(dirname -- "$PI_BIN")")
-if [[ -d $PI_BIN_PARENT ]]; then
-    add_write_protected_tree "$(canonical_dir "$PI_BIN_PARENT")" "$PI_BIN_PARENT"
-fi
-
-# On this host the user's pi wrapper defaults to /bin/pi, and /bin/pi is a
-# symlink. Overlay the resolved target at /bin/pi so the wrapper can keep its
-# normal default without needing an environment override.
-if [[ -e /bin/pi ]]; then
-    PI_REAL_TARGET=$(canonical_path /bin/pi)
-    add_write_protected_file "$PI_REAL_TARGET" /bin/pi
-fi
-
 sf attach "$ATTACH_DIR"
+
+BWRAP_CWD_ARGS=()
+case "$HOST_CWD" in
+    /tmp|/tmp/*|/run|/run/*)
+        accum=
+        IFS=/ read -r -a parts <<< "${HOST_CWD#/}"
+        for part in "${parts[@]}"; do
+            [[ -z $part ]] && continue
+            accum=$accum/$part
+            BWRAP_CWD_ARGS+=(--dir "$accum")
+        done
+        BWRAP_CWD_ARGS+=(--bind "$ATTACH_DIR$HOST_CWD" "$HOST_CWD")
+        ;;
+esac
 
 cat >&2 <<EOF
 pi-sandbox: sandboxfs session is running
@@ -317,9 +237,11 @@ EOF
 "$BWRAP_BIN" \
     --die-with-parent \
     --bind "$ATTACH_DIR" / \
-    "${BWRAP_RO_BINDS[@]}" \
-    --dev-bind /dev /dev \
+    --dev /dev \
     --proc /proc \
+    --tmpfs /tmp \
+    --tmpfs /run \
+    "${BWRAP_CWD_ARGS[@]}" \
     --chdir "$HOST_CWD" \
     --setenv PATH "$SANDBOXED_PATH" \
     "$PI_BIN" "$@"
