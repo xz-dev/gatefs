@@ -187,6 +187,8 @@ fn attach_readlink_passthrough() {
         .assert()
         .success();
 
+    let metadata = fs::symlink_metadata(mountpoint.join("data/link")).unwrap();
+    assert!(metadata.file_type().is_symlink());
     assert_eq!(
         fs::read_link(mountpoint.join("data/link")).unwrap(),
         Path::new("target-file")
