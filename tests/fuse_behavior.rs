@@ -115,6 +115,82 @@ fn pending_ids(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn c_string_path(path: &Path) -> std::ffi::CString {
+    std::ffi::CString::new(path.to_str().unwrap()).unwrap()
+}
+
+fn c_string(value: &str) -> std::ffi::CString {
+    std::ffi::CString::new(value).unwrap()
+}
+
+fn set_xattr(path: &Path, name: &str, value: &[u8]) -> std::io::Result<()> {
+    let path = c_string_path(path);
+    let name = c_string(name);
+    let result = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn get_xattr(path: &Path, name: &str) -> std::io::Result<Vec<u8>> {
+    let path = c_string_path(path);
+    let name = c_string(name);
+    let size = unsafe { libc::getxattr(path.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut value = vec![0; size as usize];
+    let read = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    value.truncate(read as usize);
+    Ok(value)
+}
+
+fn list_xattr(path: &Path) -> std::io::Result<Vec<u8>> {
+    let path = c_string_path(path);
+    let size = unsafe { libc::listxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut names = vec![0; size as usize];
+    let read = unsafe { libc::listxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    names.truncate(read as usize);
+    Ok(names)
+}
+
+fn remove_xattr(path: &Path, name: &str) -> std::io::Result<()> {
+    let path = c_string_path(path);
+    let name = c_string(name);
+    let result = unsafe { libc::removexattr(path.as_ptr(), name.as_ptr()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 #[test]
 #[ignore]
 fn attach_and_detach_log_lifecycle_events() {
@@ -160,6 +236,53 @@ fn attach_and_detach_log_lifecycle_events() {
             .any(|line| line.contains(" detach ")
                 && line.contains(&mountpoint.display().to_string()))
     );
+}
+
+#[test]
+#[ignore]
+fn attach_xattr_passthrough() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    set_xattr(&local.join("file"), "user.before", b"one").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_eq!(
+        get_xattr(&mountpoint.join("data/file"), "user.before").unwrap(),
+        b"one"
+    );
+    let names = list_xattr(&mountpoint.join("data/file")).unwrap();
+    assert!(
+        names
+            .windows(b"user.before\0".len())
+            .any(|window| window == b"user.before\0")
+    );
+
+    set_xattr(&mountpoint.join("data/file"), "user.after", b"two").unwrap();
+    assert_eq!(
+        get_xattr(&local.join("file"), "user.after").unwrap(),
+        b"two"
+    );
+    remove_xattr(&mountpoint.join("data/file"), "user.after").unwrap();
+    let err = get_xattr(&local.join("file"), "user.after").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENODATA));
 }
 
 #[test]

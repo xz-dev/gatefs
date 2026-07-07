@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
     INodeNo, OpenAccMode, OpenFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyIoctl, ReplyOpen, ReplyStatfs, ReplyWrite, Request,
+    ReplyEntry, ReplyIoctl, ReplyOpen, ReplyStatfs, ReplyWrite, ReplyXattr, Request,
 };
 
 use crate::hostfs;
@@ -152,6 +152,16 @@ impl SandboxFs {
         };
         attr.ino = self.remember(path);
         Ok(apply_override(attr, sandbox.metadata.get(path)))
+    }
+
+    fn local_path_for_ino(&self, ino: INodeNo) -> Option<PathBuf> {
+        let path = self.path_for_ino(ino)?;
+        let registry = self.registry.lock().unwrap();
+        let sandbox = registry.sandboxes.get(&self.sandbox_name)?;
+        match sandbox.resolve(&path)? {
+            ResolvedPath::Real { local_path, .. } => Some(local_path),
+            ResolvedPath::VirtualDir { .. } => None,
+        }
     }
 
     fn path_child(&self, parent: INodeNo, name: &OsStr) -> std::result::Result<SandboxPath, Errno> {
@@ -994,6 +1004,67 @@ impl Filesystem for SandboxFs {
         }
     }
 
+    fn setxattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        if position != 0 {
+            reply.error(Errno::ENOTSUP);
+            return;
+        }
+        let Some(local_path) = self.local_path_for_ino(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match hostfs::setxattr(&local_path, name, value, flags) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(io_to_errno(err)),
+        }
+    }
+
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let Some(local_path) = self.local_path_for_ino(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match hostfs::getxattr(&local_path, name) {
+            Ok(value) if size == 0 => reply.size(value.len() as u32),
+            Ok(value) if value.len() <= size as usize => reply.data(&value),
+            Ok(_) => reply.error(Errno::ERANGE),
+            Err(err) => reply.error(io_to_errno(err)),
+        }
+    }
+
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let Some(local_path) = self.local_path_for_ino(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match hostfs::listxattr(&local_path) {
+            Ok(names) if size == 0 => reply.size(names.len() as u32),
+            Ok(names) if names.len() <= size as usize => reply.data(&names),
+            Ok(_) => reply.error(Errno::ERANGE),
+            Err(err) => reply.error(io_to_errno(err)),
+        }
+    }
+
+    fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        let Some(local_path) = self.local_path_for_ino(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match hostfs::removexattr(&local_path, name) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(io_to_errno(err)),
+        }
+    }
+
     fn write(
         &self,
         req: &Request,
@@ -1312,7 +1383,9 @@ fn io_to_errno(err: std::io::Error) -> Errno {
         libc::ENOTDIR => Errno::ENOTDIR,
         libc::EISDIR => Errno::EISDIR,
         libc::EINVAL => Errno::EINVAL,
+        libc::ERANGE => Errno::ERANGE,
         libc::EROFS => Errno::EROFS,
+        libc::ENODATA => Errno::ENODATA,
         libc::ENOSYS => Errno::ENOSYS,
         libc::ENOTSUP => Errno::ENOTSUP,
         _ => Errno::EIO,
