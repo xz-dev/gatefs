@@ -878,8 +878,8 @@ impl Filesystem for SandboxFs {
         uid: Option<u32>,
         gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        _mtime: Option<fuser::TimeOrNow>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
         _fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
@@ -910,6 +910,8 @@ impl Filesystem for SandboxFs {
             uid,
             gid,
             flags: flags.map(|f| f.bits()),
+            atime: atime.map(resolve_time_or_now),
+            mtime: mtime.map(resolve_time_or_now),
         };
         match self.begin_metadata_request(RequestIdentity::from_request(req), path, operation) {
             Ok(MetadataOutcome::Applied(attr)) => reply.attr(&TTL, &attr),
@@ -1136,6 +1138,13 @@ fn format_attach_field(attach_id: Option<u64>) -> String {
     attach_id
         .map(|id| format!(" attach={id}"))
         .unwrap_or_default()
+}
+
+fn resolve_time_or_now(value: fuser::TimeOrNow) -> SystemTime {
+    match value {
+        fuser::TimeOrNow::SpecificTime(time) => time,
+        fuser::TimeOrNow::Now => SystemTime::now(),
+    }
 }
 
 fn check_access(attr: &FileAttr, uid: u32, gid: u32, mask: AccessFlags) -> bool {
@@ -1966,6 +1975,8 @@ mod tests {
                     uid: Some(2000),
                     gid: None,
                     flags: None,
+                    atime: None,
+                    mtime: None,
                 },
             )
             .unwrap();
@@ -1979,6 +1990,8 @@ mod tests {
                     uid: None,
                     gid: Some(3000),
                     flags: None,
+                    atime: None,
+                    mtime: None,
                 },
             )
             .unwrap();

@@ -162,11 +162,18 @@ pub struct MetadataOverride {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub flags: Option<u32>,
+    pub atime: Option<SystemTime>,
+    pub mtime: Option<SystemTime>,
 }
 
 impl MetadataOverride {
     pub fn is_empty(&self) -> bool {
-        self.mode.is_none() && self.uid.is_none() && self.gid.is_none() && self.flags.is_none()
+        self.mode.is_none()
+            && self.uid.is_none()
+            && self.gid.is_none()
+            && self.flags.is_none()
+            && self.atime.is_none()
+            && self.mtime.is_none()
     }
 }
 
@@ -177,6 +184,7 @@ pub enum PendingOperationKind {
     Uid,
     Gid,
     Flags,
+    Times,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -207,6 +215,8 @@ pub enum MetadataOperation {
         uid: Option<u32>,
         gid: Option<u32>,
         flags: Option<u32>,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
     },
 }
 
@@ -227,7 +237,9 @@ impl MetadataOperation {
     pub fn event_body(&self) -> String {
         match self {
             Self::Chmod { path, mode } => format!("path={path} SETATTR mode={mode:04o}"),
-            Self::Chown { path, uid, gid } => format_setattr_body(path, None, *uid, *gid, None),
+            Self::Chown { path, uid, gid } => {
+                format_setattr_body(path, None, *uid, *gid, None, None, None)
+            }
             Self::Chattr { path, flags } => format!("path={path} CHATTR flags=0x{flags:x}"),
             Self::SetAttr {
                 path,
@@ -235,7 +247,9 @@ impl MetadataOperation {
                 uid,
                 gid,
                 flags,
-            } => format_setattr_body(path, *mode, *uid, *gid, *flags),
+                atime,
+                mtime,
+            } => format_setattr_body(path, *mode, *uid, *gid, *flags, *atime, *mtime),
         }
     }
 
@@ -257,6 +271,8 @@ impl MetadataOperation {
                 uid,
                 gid,
                 flags,
+                atime,
+                mtime,
                 ..
             } => {
                 if mode.is_some() {
@@ -270,6 +286,9 @@ impl MetadataOperation {
                 }
                 if flags.is_some() {
                     kinds.push(PendingOperationKind::Flags);
+                }
+                if atime.is_some() || mtime.is_some() {
+                    kinds.push(PendingOperationKind::Times);
                 }
             }
         }
@@ -298,14 +317,22 @@ impl MetadataOperation {
                 uid,
                 gid,
                 flags,
-            } => match (mode, uid, gid, flags) {
-                (Some(mode), None, None, None) => format!("chmod {:o} {}", mode, path),
-                (None, Some(uid), None, None) => format_chown_shell_hint(path, Some(*uid), None),
-                (None, None, Some(gid), None) => format_chown_shell_hint(path, None, Some(*gid)),
-                (None, Some(uid), Some(gid), None) => {
+                atime,
+                mtime,
+            } => match (mode, uid, gid, flags, atime, mtime) {
+                (Some(mode), None, None, None, None, None) => format!("chmod {:o} {}", mode, path),
+                (None, Some(uid), None, None, None, None) => {
+                    format_chown_shell_hint(path, Some(*uid), None)
+                }
+                (None, None, Some(gid), None, None, None) => {
+                    format_chown_shell_hint(path, None, Some(*gid))
+                }
+                (None, Some(uid), Some(gid), None, None, None) => {
                     format_chown_shell_hint(path, Some(*uid), Some(*gid))
                 }
-                (None, None, None, Some(flags)) => format!("chattr flags=0x{flags:x} {path}"),
+                (None, None, None, Some(flags), None, None) => {
+                    format!("chattr flags=0x{flags:x} {path}")
+                }
                 _ => self.event_body(),
             },
         }
@@ -318,6 +345,8 @@ fn format_setattr_body(
     uid: Option<u32>,
     gid: Option<u32>,
     flags: Option<u32>,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
 ) -> String {
     let mut fields = Vec::new();
     if let Some(mode) = mode {
@@ -331,6 +360,12 @@ fn format_setattr_body(
     }
     if let Some(flags) = flags {
         fields.push(format!("flags=0x{flags:x}"));
+    }
+    if atime.is_some() {
+        fields.push("atime=<set>".to_string());
+    }
+    if mtime.is_some() {
+        fields.push("mtime=<set>".to_string());
     }
     if fields.is_empty() {
         fields.push("unchanged".to_string());
@@ -911,6 +946,8 @@ impl Sandbox {
                 uid,
                 gid,
                 flags,
+                atime,
+                mtime,
                 ..
             } => {
                 if let Some(mode) = mode {
@@ -924,6 +961,12 @@ impl Sandbox {
                 }
                 if let Some(flags) = flags {
                     entry.flags = Some(*flags);
+                }
+                if let Some(atime) = atime {
+                    entry.atime = Some(*atime);
+                }
+                if let Some(mtime) = mtime {
+                    entry.mtime = Some(*mtime);
                 }
             }
         }
@@ -1267,6 +1310,12 @@ pub fn apply_override(mut attr: FileAttr, override_: Option<&MetadataOverride>) 
         }
         if let Some(flags) = override_.flags {
             attr.flags = flags;
+        }
+        if let Some(atime) = override_.atime {
+            attr.atime = atime;
+        }
+        if let Some(mtime) = override_.mtime {
+            attr.mtime = mtime;
         }
     }
     attr

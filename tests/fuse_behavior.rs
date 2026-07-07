@@ -3,7 +3,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use assert_cmd::prelude::*;
 
@@ -441,6 +441,83 @@ fn trusted_chown_preserves_underlying_owner_and_logs() {
             "path=/data/file SETATTR uid=1234 gid=2345",
         ],
     );
+}
+
+#[test]
+#[ignore]
+fn direct_touch_pending_can_be_allowed_without_host_mutation() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_direct_touch");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    let underlying_before = fs::metadata(local.join("file")).unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+    let mut child = std::process::Command::new("touch")
+        .env("TZ", "UTC")
+        .args([
+            "-d",
+            "2001-02-03 04:05:06 UTC",
+            mountpoint.join("data/file").to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(3), || {
+        session
+            .sandbox_cmd()
+            .arg("allow")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("mtime=<set>"))
+            .unwrap_or(false)
+    }));
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    let id = pending.split_whitespace().next().unwrap().to_string();
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    assert!(wait_child(&mut child).success());
+
+    let mount_metadata = fs::metadata(mountpoint.join("data/file")).unwrap();
+    assert_eq!(
+        mount_metadata
+            .modified()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        981173106
+    );
+    assert_eq!(
+        fs::metadata(local.join("file"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        underlying_before.modified().unwrap()
+    );
+    let log = session_log(&session);
+    assert_log_line_contains(
+        &log,
+        &[" pending ", "path=/data/file SETATTR", "mtime=<set>"],
+    );
+    assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
 }
 
 #[test]
