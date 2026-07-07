@@ -594,7 +594,11 @@ impl SessionState {
                 .sandboxes
                 .get_mut(name)
                 .ok_or_else(|| Error::msg(format!("sandbox not found: {name}")))?;
-            sandbox.apply_metadata_override(&pending.operation)?;
+            sandbox.apply_metadata_override_to_object(
+                pending.object.clone(),
+                pending.operation.path().clone(),
+                &pending.operation,
+            )?;
         }
         let attach_field = pending
             .attach_id()
@@ -1852,6 +1856,10 @@ mod tests {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
                 },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
+                },
                 kinds: vec![crate::state::PendingOperationKind::Mode],
                 pid: 123,
                 uid: 1000,
@@ -1933,6 +1941,10 @@ mod tests {
                 operation: crate::state::MetadataOperation::Chmod {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
+                },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
                 },
                 kinds: vec![crate::state::PendingOperationKind::Mode],
                 pid: 123,
@@ -2094,6 +2106,10 @@ mod tests {
                     attach_id: None,
                     description: operation.event_body(),
                     operation,
+                    object: crate::state::MetadataObjectKey {
+                        layer_id: 1,
+                        relative_path: std::path::PathBuf::from("file"),
+                    },
                     kinds,
                     pid: 123,
                     uid: 1000,
@@ -2159,6 +2175,10 @@ mod tests {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
                 },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
+                },
                 kinds: vec![crate::state::PendingOperationKind::Mode],
                 pid: 123,
                 uid: 1000,
@@ -2181,8 +2201,7 @@ mod tests {
         let registry = session.registry.lock().unwrap();
         let sandbox = registry.sandboxes.get("a").unwrap();
         let override_ = sandbox
-            .metadata
-            .get(&SandboxPath::new("/data/file").unwrap())
+            .metadata_override_for_path(&SandboxPath::new("/data/file").unwrap())
             .unwrap();
         assert_eq!(override_.mode, Some(0o444));
         assert!(!registry.pending.contains_key(&2));
@@ -2219,6 +2238,10 @@ mod tests {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
                 },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
+                },
                 kinds: vec![crate::state::PendingOperationKind::Mode],
                 pid: 123,
                 uid: 1000,
@@ -2240,12 +2263,12 @@ mod tests {
 
         let registry = session.registry.lock().unwrap();
         assert!(
-            !registry
+            registry
                 .sandboxes
                 .get("a")
                 .unwrap()
-                .metadata
-                .contains_key(&SandboxPath::new("/data/file").unwrap())
+                .metadata_override_for_path(&SandboxPath::new("/data/file").unwrap())
+                .is_none()
         );
         assert!(!registry.pending.contains_key(&2));
         assert!(
@@ -2287,6 +2310,10 @@ mod tests {
                 operation: crate::state::MetadataOperation::Chmod {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
+                },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
                 },
                 kinds: vec![crate::state::PendingOperationKind::Mode],
                 pid: 123,

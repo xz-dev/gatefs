@@ -20,10 +20,10 @@ use crate::log;
 use crate::path::SandboxPath;
 use crate::process_info::{ProcessInfoProvider, SysinfoProcessInfoProvider};
 use crate::state::{
-    FS_IMMUTABLE_FL, GrantMatchOutcome, MetadataOperation, PendingDecision, PendingMetadataRequest,
-    PendingReadWriteRequest, PendingWaiter, ReadWriteOperation,
+    FS_IMMUTABLE_FL, GrantMatchOutcome, MetadataObjectKey, MetadataOperation, PendingDecision,
+    PendingMetadataRequest, PendingReadWriteRequest, PendingWaiter, ReadWriteOperation,
     RequesterIdentity as RequestIdentity, ResolvedPath, SandboxRegistry, TTL, apply_override,
-    mode_to_kind, stable_ino, virtual_dir_attr,
+    mode_to_kind, pending_metadata_keys, stable_ino, virtual_dir_attr,
 };
 
 const FS_IOC_GETFLAGS: u32 = 0x8008_6601;
@@ -71,6 +71,7 @@ struct HandleInfo {
 struct PendingMetadataOutcome {
     unchanged_attr: FileAttr,
     path: SandboxPath,
+    object: MetadataObjectKey,
     operation: MetadataOperation,
     waiter: PendingWaiter,
 }
@@ -151,7 +152,10 @@ impl SandboxFs {
             }
         };
         attr.ino = self.remember(path);
-        Ok(apply_override(attr, sandbox.metadata.get(path)))
+        Ok(apply_override(
+            attr,
+            sandbox.metadata_override_for_path(path),
+        ))
     }
 
     fn path_and_local_path_for_ino(&self, ino: INodeNo) -> Option<(SandboxPath, PathBuf)> {
@@ -219,6 +223,13 @@ impl SandboxFs {
     ) -> std::result::Result<MetadataOutcome, Errno> {
         let unchanged_attr = self.attr_for_path(&path)?;
         let mut registry = self.registry.lock().unwrap();
+        let object = {
+            let sandbox = registry
+                .sandboxes
+                .get(&self.sandbox_name)
+                .ok_or(Errno::ENOENT)?;
+            sandbox.metadata_object_key(&path).ok_or(Errno::ENOTSUP)?
+        };
         let trusted = Self::is_trusted_operation(
             &registry,
             &self.sandbox_name,
@@ -267,7 +278,7 @@ impl SandboxFs {
                 .get_mut(&self.sandbox_name)
                 .ok_or(Errno::ENOENT)?;
             sandbox
-                .apply_metadata_override(&operation)
+                .apply_metadata_override_to_object(object, path.clone(), &operation)
                 .map_err(|_| Errno::ENOTSUP)?;
             drop(registry);
             return self.attr_for_path(&path).map(MetadataOutcome::Applied);
@@ -287,8 +298,7 @@ impl SandboxFs {
         let mut superseded_waiters = Vec::new();
         let mut log_failed = false;
 
-        let replacement_ids: Vec<u64> = operation
-            .pending_keys(&self.sandbox_name)
+        let replacement_ids: Vec<u64> = pending_metadata_keys(&self.sandbox_name, &object, &kinds)
             .into_iter()
             .filter_map(|key| registry.pending_index.remove(&key))
             .collect();
@@ -350,6 +360,7 @@ impl SandboxFs {
             sandbox: self.sandbox_name.clone(),
             attach_id: self.attach_id,
             operation: operation.clone(),
+            object: object.clone(),
             kinds,
             pid: identity.pid,
             uid: identity.uid,
@@ -363,6 +374,7 @@ impl SandboxFs {
         Ok(MetadataOutcome::Pending(PendingMetadataOutcome {
             unchanged_attr,
             path,
+            object,
             operation,
             waiter,
         }))
@@ -477,7 +489,7 @@ impl SandboxFs {
     ) -> std::result::Result<FileAttr, Errno> {
         match wait_for_decision(&pending.waiter) {
             PendingDecision::Apply => {
-                self.apply_pending_operation(&pending.operation)?;
+                self.apply_pending_operation(&pending.operation, &pending.object)?;
                 self.attr_for_path(&pending.path)
             }
             PendingDecision::DoNothing => Ok(pending.unchanged_attr),
@@ -489,6 +501,7 @@ impl SandboxFs {
     fn apply_pending_operation(
         &self,
         operation: &MetadataOperation,
+        object: &MetadataObjectKey,
     ) -> std::result::Result<(), Errno> {
         let mut registry = self.registry.lock().unwrap();
         let sandbox = registry
@@ -496,7 +509,7 @@ impl SandboxFs {
             .get_mut(&self.sandbox_name)
             .ok_or(Errno::ENOENT)?;
         sandbox
-            .apply_metadata_override(operation)
+            .apply_metadata_override_to_object(object.clone(), operation.path().clone(), operation)
             .map_err(|_| Errno::ENOTSUP)
     }
 
@@ -511,10 +524,12 @@ impl SandboxFs {
     fn spawn_ioctl_waiter(&self, pending: PendingMetadataOutcome, reply: ReplyIoctl) {
         let fs = self.clone();
         std::thread::spawn(move || match wait_for_decision(&pending.waiter) {
-            PendingDecision::Apply => match fs.apply_pending_operation(&pending.operation) {
-                Ok(()) => reply.ioctl(0, &[]),
-                Err(err) => reply.error(err),
-            },
+            PendingDecision::Apply => {
+                match fs.apply_pending_operation(&pending.operation, &pending.object) {
+                    Ok(()) => reply.ioctl(0, &[]),
+                    Err(err) => reply.error(err),
+                }
+            }
             PendingDecision::DoNothing => reply.ioctl(0, &[]),
             PendingDecision::Deny => reply.error(Errno::EPERM),
             PendingDecision::Cancel => reply.error(Errno::ECANCELED),
@@ -2214,6 +2229,90 @@ mod tests {
         assert!(data.contains(" id=1 pending path=/data/file SETATTR mode=0444"));
         assert!(data.contains(" id=2 decision request=1 DENY reason=superseded"));
         assert!(data.contains(" id=3 pending path=/data/file SETATTR mode=0600"));
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pending_metadata_allow_applies_original_layer_after_remount() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("file"), "first").unwrap();
+        std::fs::write(second.join("file"), "second").unwrap();
+        std::fs::set_permissions(first.join("file"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::set_permissions(second.join("file"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+
+        let mut sandbox = Sandbox::new("demo", log_path);
+        sandbox.add_layer(&first, SandboxPath::new("/data").unwrap());
+        let registry = Arc::new(Mutex::new(SandboxRegistry::new()));
+        registry
+            .lock()
+            .unwrap()
+            .sandboxes
+            .insert("demo".to_string(), sandbox);
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+        let path = SandboxPath::new("/data/file").unwrap();
+
+        let pending = match fs
+            .begin_metadata_request(
+                RequestIdentity {
+                    pid: 123,
+                    uid: 1000,
+                    gid: 1000,
+                },
+                path.clone(),
+                MetadataOperation::Chmod {
+                    path: path.clone(),
+                    mode: 0o444,
+                },
+            )
+            .unwrap()
+        {
+            MetadataOutcome::Pending(pending) => pending,
+            MetadataOutcome::Applied(_) => panic!("expected pending request"),
+        };
+
+        {
+            let mut registry = registry.lock().unwrap();
+            registry
+                .sandboxes
+                .get_mut("demo")
+                .unwrap()
+                .add_layer(&second, SandboxPath::new("/data").unwrap());
+        }
+        assert_eq!(fs.attr_for_path(&path).unwrap().perm, 0o600);
+
+        fs.apply_pending_operation(&pending.operation, &pending.object)
+            .unwrap();
+        assert_eq!(fs.attr_for_path(&path).unwrap().perm, 0o600);
+        assert!(
+            registry
+                .lock()
+                .unwrap()
+                .sandboxes
+                .get("demo")
+                .unwrap()
+                .metadata_differences()
+                .is_empty()
+        );
+
+        {
+            let mut registry = registry.lock().unwrap();
+            assert!(
+                registry
+                    .sandboxes
+                    .get_mut("demo")
+                    .unwrap()
+                    .remove_layer(&SandboxPath::new("/data").unwrap())
+            );
+        }
+        assert_eq!(fs.attr_for_path(&path).unwrap().perm, 0o444);
         writer.shutdown().unwrap();
     }
 

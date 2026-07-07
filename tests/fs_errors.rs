@@ -16,7 +16,7 @@ fn hidden_paths_cannot_receive_metadata_overrides() {
         })
         .unwrap_err()
         .to_string();
-    assert!(error.contains("path not found"));
+    assert!(error.contains("path not found or not real"));
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn missing_paths_cannot_receive_metadata_overrides() {
         })
         .unwrap_err()
         .to_string();
-    assert!(error.contains("path not found"));
+    assert!(error.contains("path not found or not real"));
 }
 
 #[test]

@@ -996,6 +996,10 @@ mod tests {
                     path: SandboxPath::new("/data/file").unwrap(),
                     mode: 0o444,
                 },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
+                },
                 kinds: vec![crate::state::PendingOperationKind::Mode],
                 pid: 123,
                 uid: 1000,
@@ -1009,6 +1013,10 @@ mod tests {
                 operation: crate::state::MetadataOperation::Chattr {
                     path: SandboxPath::new("/data/file").unwrap(),
                     flags: crate::state::FS_IMMUTABLE_FL,
+                },
+                object: crate::state::MetadataObjectKey {
+                    layer_id: 1,
+                    relative_path: std::path::PathBuf::from("file"),
                 },
                 kinds: vec![crate::state::PendingOperationKind::Flags],
                 pid: 123,

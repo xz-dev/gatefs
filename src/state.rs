@@ -167,6 +167,18 @@ impl ReadWriteOperation {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct MetadataObjectKey {
+    pub layer_id: u64,
+    pub relative_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetadataEntry {
+    pub sandbox_path: SandboxPath,
+    pub override_: MetadataOverride,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataOverride {
     pub mode: Option<u16>,
@@ -202,7 +214,7 @@ pub enum PendingOperationKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PendingOperationKey {
     pub sandbox: String,
-    pub path: SandboxPath,
+    pub object: MetadataObjectKey,
     pub kind: PendingOperationKind,
 }
 
@@ -322,17 +334,6 @@ impl MetadataOperation {
         kinds
     }
 
-    pub fn pending_keys(&self, sandbox: &str) -> Vec<PendingOperationKey> {
-        self.pending_kinds()
-            .into_iter()
-            .map(|kind| PendingOperationKey {
-                sandbox: sandbox.to_string(),
-                path: self.path().clone(),
-                kind,
-            })
-            .collect()
-    }
-
     pub fn shell_hint(&self) -> String {
         match self {
             Self::Chmod { path, mode } => format!("chmod {:o} {}", mode, path),
@@ -417,6 +418,7 @@ pub struct PendingMetadataRequest {
     pub sandbox: String,
     pub attach_id: Option<u64>,
     pub operation: MetadataOperation,
+    pub object: MetadataObjectKey,
     pub kinds: Vec<PendingOperationKind>,
     pub pid: u32,
     pub uid: u32,
@@ -426,16 +428,24 @@ pub struct PendingMetadataRequest {
 
 impl PendingMetadataRequest {
     pub fn keys(&self) -> Vec<PendingOperationKey> {
-        self.kinds
-            .iter()
-            .copied()
-            .map(|kind| PendingOperationKey {
-                sandbox: self.sandbox.clone(),
-                path: self.operation.path().clone(),
-                kind,
-            })
-            .collect()
+        pending_metadata_keys(&self.sandbox, &self.object, &self.kinds)
     }
+}
+
+pub fn pending_metadata_keys(
+    sandbox: &str,
+    object: &MetadataObjectKey,
+    kinds: &[PendingOperationKind],
+) -> Vec<PendingOperationKey> {
+    kinds
+        .iter()
+        .copied()
+        .map(|kind| PendingOperationKey {
+            sandbox: sandbox.to_string(),
+            object: object.clone(),
+            kind,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -779,7 +789,7 @@ pub struct Sandbox {
     pub name: String,
     pub layers: Vec<MountLayer>,
     pub hides: Vec<HideRule>,
-    pub metadata: BTreeMap<SandboxPath, MetadataOverride>,
+    pub metadata: BTreeMap<MetadataObjectKey, MetadataEntry>,
     pub protection_rules: Vec<ProtectionRule>,
     pub attaches: BTreeMap<PathBuf, AttachMount>,
     pub next_layer_id: u64,
@@ -1041,23 +1051,61 @@ impl Sandbox {
         Ok(children)
     }
 
+    pub fn metadata_object_key(&self, path: &SandboxPath) -> Option<MetadataObjectKey> {
+        match self.resolve(path)? {
+            ResolvedPath::Real { layer_id, .. } => {
+                let layer = self.layers.iter().find(|layer| layer.id == layer_id)?;
+                let relative_path = path.strip_prefix(&layer.on_fs).ok()?;
+                Some(MetadataObjectKey {
+                    layer_id,
+                    relative_path,
+                })
+            }
+            ResolvedPath::VirtualDir { .. } => None,
+        }
+    }
+
+    pub fn metadata_override_for_path(&self, path: &SandboxPath) -> Option<&MetadataOverride> {
+        let key = self.metadata_object_key(path)?;
+        self.metadata.get(&key).map(|entry| &entry.override_)
+    }
+
     pub fn apply_metadata_override(&mut self, op: &MetadataOperation) -> Result<()> {
         let path = op.path().clone();
-        if self.resolve(&path).is_none() {
-            return Err(Error::msg(format!("path not found: {path}")));
+        let key = self
+            .metadata_object_key(&path)
+            .ok_or_else(|| Error::msg(format!("path not found or not real: {path}")))?;
+        self.apply_metadata_override_to_object(key, path, op)
+    }
+
+    pub fn apply_metadata_override_to_object(
+        &mut self,
+        key: MetadataObjectKey,
+        sandbox_path: SandboxPath,
+        op: &MetadataOperation,
+    ) -> Result<()> {
+        if !self.layers.iter().any(|layer| layer.id == key.layer_id) {
+            return Err(Error::msg(format!(
+                "metadata layer not found for path: {sandbox_path}"
+            )));
         }
-        let entry = self.metadata.entry(path).or_default();
+        let entry = self.metadata.entry(key).or_insert_with(|| MetadataEntry {
+            sandbox_path,
+            override_: MetadataOverride::default(),
+        });
+        entry.sandbox_path = op.path().clone();
+        let override_ = &mut entry.override_;
         match op {
-            MetadataOperation::Chmod { mode, .. } => entry.mode = Some(*mode),
+            MetadataOperation::Chmod { mode, .. } => override_.mode = Some(*mode),
             MetadataOperation::Chown { uid, gid, .. } => {
                 if let Some(uid) = uid {
-                    entry.uid = Some(*uid);
+                    override_.uid = Some(*uid);
                 }
                 if let Some(gid) = gid {
-                    entry.gid = Some(*gid);
+                    override_.gid = Some(*gid);
                 }
             }
-            MetadataOperation::Chattr { flags, .. } => entry.flags = Some(*flags),
+            MetadataOperation::Chattr { flags, .. } => override_.flags = Some(*flags),
             MetadataOperation::SetXattr { .. } | MetadataOperation::RemoveXattr { .. } => {}
             MetadataOperation::SetAttr {
                 mode,
@@ -1069,22 +1117,22 @@ impl Sandbox {
                 ..
             } => {
                 if let Some(mode) = mode {
-                    entry.mode = Some(*mode);
+                    override_.mode = Some(*mode);
                 }
                 if let Some(uid) = uid {
-                    entry.uid = Some(*uid);
+                    override_.uid = Some(*uid);
                 }
                 if let Some(gid) = gid {
-                    entry.gid = Some(*gid);
+                    override_.gid = Some(*gid);
                 }
                 if let Some(flags) = flags {
-                    entry.flags = Some(*flags);
+                    override_.flags = Some(*flags);
                 }
                 if let Some(atime) = atime {
-                    entry.atime = Some(*atime);
+                    override_.atime = Some(*atime);
                 }
                 if let Some(mtime) = mtime {
-                    entry.mtime = Some(*mtime);
+                    override_.mtime = Some(*mtime);
                 }
             }
         }
@@ -1094,11 +1142,13 @@ impl Sandbox {
     pub fn metadata_differences(&self) -> Vec<SandboxPath> {
         self.metadata
             .iter()
-            .filter_map(|(path, value)| {
-                if value.is_empty() {
+            .filter_map(|(key, entry)| {
+                if entry.override_.is_empty()
+                    || self.metadata_object_key(&entry.sandbox_path).as_ref() != Some(key)
+                {
                     None
                 } else {
-                    Some(path.clone())
+                    Some(entry.sandbox_path.clone())
                 }
             })
             .collect()
@@ -1610,6 +1660,63 @@ mod tests {
     }
 
     #[test]
+    fn metadata_overrides_follow_resolved_layers_through_remount_stack() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let mut s = Sandbox::new("s", first.path().join("s.log"));
+        s.add_layer(first.path(), SandboxPath::new("/data").unwrap());
+        s.apply_metadata_override(&MetadataOperation::Chmod {
+            path: SandboxPath::new("/data/file").unwrap(),
+            mode: 0o444,
+        })
+        .unwrap();
+
+        assert_eq!(
+            s.metadata_override_for_path(&SandboxPath::new("/data/file").unwrap())
+                .and_then(|override_| override_.mode),
+            Some(0o444)
+        );
+        assert_eq!(
+            s.metadata_differences(),
+            vec![SandboxPath::new("/data/file").unwrap()]
+        );
+
+        s.add_layer(second.path(), SandboxPath::new("/data").unwrap());
+        assert!(
+            s.metadata_override_for_path(&SandboxPath::new("/data/file").unwrap())
+                .is_none()
+        );
+        assert!(s.metadata_differences().is_empty());
+
+        assert!(s.remove_layer(&SandboxPath::new("/data").unwrap()));
+        assert_eq!(
+            s.metadata_override_for_path(&SandboxPath::new("/data/file").unwrap())
+                .and_then(|override_| override_.mode),
+            Some(0o444)
+        );
+    }
+
+    #[test]
+    fn path_scoped_protection_applies_to_later_visible_descendants() {
+        let root = TempDir::new().unwrap();
+        let pi = TempDir::new().unwrap();
+        let mut s = Sandbox::new("s", root.path().join("s.log"));
+        s.add_layer(root.path(), SandboxPath::new("/").unwrap());
+        s.protect(ProtectionKind::Write, SandboxPath::new("/root/**").unwrap());
+        s.add_hide(SandboxPath::new("/root").unwrap());
+        s.add_layer(pi.path(), SandboxPath::new("/root/.pi").unwrap());
+
+        assert!(matches!(
+            s.resolve(&SandboxPath::new("/root/.pi").unwrap()),
+            Some(ResolvedPath::Real { .. })
+        ));
+        assert!(s.is_protected(
+            ProtectionKind::Write,
+            &SandboxPath::new("/root/.pi/config").unwrap()
+        ));
+    }
+
+    #[test]
     fn protection_pattern_matching_uses_exact_single_component_and_recursive_globs() {
         let mut s = Sandbox::new("s", TempDir::new().unwrap().path().join("s.log"));
         s.protect(ProtectionKind::Read, SandboxPath::new("/secret").unwrap());
@@ -1881,6 +1988,10 @@ mod tests {
             sandbox: "s".to_string(),
             attach_id: None,
             operation: metadata_operation.clone(),
+            object: MetadataObjectKey {
+                layer_id: 1,
+                relative_path: std::path::PathBuf::from("file"),
+            },
             kinds: metadata_operation.pending_kinds(),
             pid: 123,
             uid: 1000,
