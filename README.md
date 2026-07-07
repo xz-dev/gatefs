@@ -50,9 +50,18 @@ sandboxfs <name> umount <on_fs>
 sandboxfs <name> hide <on_fs>
 sandboxfs <name> protect-read <pattern>
 sandboxfs <name> protect-write <pattern>
+sandboxfs <name> protect-metadata <pattern>
 sandboxfs <name> unprotect-read <pattern>
 sandboxfs <name> unprotect-write <pattern>
-sandboxfs <name> list-protection [--read] [--write]
+sandboxfs <name> unprotect-metadata <pattern>
+sandboxfs <name> passthrough-read <pattern>
+sandboxfs <name> passthrough-write <pattern>
+sandboxfs <name> passthrough-metadata <pattern>
+sandboxfs <name> unpassthrough-read <pattern>
+sandboxfs <name> unpassthrough-write <pattern>
+sandboxfs <name> unpassthrough-metadata <pattern>
+sandboxfs <name> list-protection [--read] [--write] [--metadata]
+sandboxfs <name> list-passthrough [--read] [--write] [--metadata]
 sandboxfs <name> chmod ...
 sandboxfs <name> chown ...
 sandboxfs <name> chattr ...
@@ -93,13 +102,16 @@ A hide rule removes that path and descendants from visibility until a newer mapp
 
 These trusted CLI-initiated operations skip the pending authorization flow, but they can still fail normally if the command fails, the path does not exist, or the FUSE operation is unsupported. They only update sandbox-local metadata overrides; they do not chmod/chown/chattr the underlying files.
 
-Direct metadata changes through an attached FUSE mountpoint are untrusted. For example:
+Direct metadata changes through an attached FUSE mountpoint are untrusted but not protected by default. Unless a path matches `protect-metadata`, metadata operations update sandbox-local metadata overrides where sandboxfs manages that metadata surface, without mutating the underlying files and without creating a pending request.
+
+Protect metadata explicitly when direct metadata changes should require approval:
 
 ```sh
+sandboxfs demo protect-metadata '/data/**'
 chmod 444 "$DEMO_MNT/file.txt"
 ```
 
-That request becomes pending. Inspect or resolve it with:
+That protected request becomes pending. Inspect or resolve it with:
 
 ```sh
 sandboxfs demo allow
@@ -115,7 +127,7 @@ Inspecting pending requests is read-only. Multiple CLI tools or Access TUI insta
 
 `allow --do-nothing` lets the blocked FUSE request return success without changing sandbox metadata or underlying files.
 
-Read/write protection rules are configured separately with `protect-read`, `protect-write`, `unprotect-read`, `unprotect-write`, and `list-protection`. For protected read/write requests, bare `allow <operation_id>` only releases the current blocked request. Add grant options to create a future-matching read/write grant: `--path <sandbox-glob>` chooses the grant path pattern, `--duration` or `--duration=<duration>` creates a duration grant (default 30 minutes), and `--tree` snapshots the requester's current process tree instead of the exact requester process. If grant options are present without `--duration`, the grant is one-shot.
+Read/write protection rules are configured separately with `protect-read`, `protect-write`, `unprotect-read`, `unprotect-write`, and `list-protection`. Metadata protection uses `protect-metadata` and `unprotect-metadata`; `list-protection --metadata` filters to metadata rules. Passthrough rules are also layer-specific: `passthrough-read` and `passthrough-write` apply only to read/write operations, while `passthrough-metadata` applies only to metadata operations. A passthrough or protection pattern is a sandbox namespace glob: `/a/b` matches that exact file or directory, `/a/b/` is directory-only, `/a/*` matches one path segment below `/a`, and `/a/**` matches a recursive subtree below `/a`. For protected read/write requests, bare `allow <operation_id>` only releases the current blocked request. Add grant options to create a future-matching read/write grant: `--path <sandbox-glob>` chooses the grant path pattern, `--duration` or `--duration=<duration>` creates a duration grant (default 30 minutes), and `--tree` snapshots the requester's current process tree instead of the exact requester process. If grant options are present without `--duration`, the grant is one-shot.
 
 The TUI displays pending requests and supports allow, deny, do-nothing, and edit-command. Edit-command reruns a user-edited `chmod`, `chown`, or `chattr` through the trusted `sandboxfs` CLI path, then releases the original pending request with do-nothing. Read/write TUI allow/deny/do-nothing resolves only the selected pending request and does not create broader grants.
 
@@ -154,7 +166,7 @@ The log writer is a serialized event loop. FUSE and control paths publish events
 
 ## Current limitations
 
-- File content and directory structure writes are intentionally read-only in this first version: create/write/truncate/unlink/rename/mkdir/rmdir return read-only or unsupported errors and never modify underlying files.
+- File content and directory structure writes are read-only unless a path matches an explicit passthrough rule for a supported operation. In this version, `passthrough-write` enables lock-directory mkdir/rmdir passthrough, and `passthrough-metadata` enables timestamp and xattr metadata passthrough for matching visible paths. Other create/write/truncate/unlink/rename operations still return read-only or unsupported errors and never modify underlying files.
 - Real FUSE behavior depends on `/dev/fuse` and `fusermount3` availability and permissions.
 - The project is experimental.
 
