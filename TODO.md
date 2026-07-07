@@ -6,11 +6,10 @@ Extended attributes must not be blanket-passthrough. Some xattrs describe the ba
 
 Policy for the first xattr slice:
 
-- only `user.*` xattrs are visible through sandboxfs;
-- visible `user.*` xattrs are thin passthrough to the backing filesystem;
+- xattr operations are thin passthrough to the backing filesystem;
 - `getxattr`/`listxattr` are metadata probes, not protected READ operations;
-- `setxattr`/`removexattr` for `user.*` are thin passthrough host metadata mutations, because sandboxfs does not manage xattr overlays yet;
-- non-`user.*` xattrs are filtered: `listxattr` omits them, `getxattr` reports them as absent, and `setxattr`/`removexattr` reject them as unsupported by sandboxfs policy;
-- once an allowed `user.*` xattr operation reaches the backing filesystem, preserve the host filesystem's support and errno behavior.
+- `setxattr`/`removexattr` are backing-host metadata mutations, because sandboxfs does not manage xattr overlays yet;
+- preserve the host filesystem's support and errno behavior once an xattr operation reaches the backing filesystem;
+- do not partially filter or synthesize security/SELinux/capability/ACL xattrs in the first slice. Those values can look odd from a sandboxfs view, but host passthrough is at least reproducible. Partial sandboxfs emulation is more likely to produce unstable and surprising behavior.
 
-Future work: revisit whether any non-`user.*` xattr namespace needs synthetic sandboxfs-specific values or sandbox-local overrides.
+Future work: revisit whether any xattr namespace should become a sandboxfs-managed override. If that happens, it must be designed as an explicit managed surface like mode/uid/gid/flags/timestamps, not as an ad-hoc filter layered on passthrough.
