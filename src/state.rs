@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use fuser::{FileAttr, FileType, INodeNo};
 use serde::{Deserialize, Serialize};
 
+use crate::overlay::{OverlayEffect, collapse_latest};
 use crate::path::SandboxPath;
 use crate::process_info::ProcessIdentityEvidence;
 use crate::{Error, Result};
@@ -413,6 +414,10 @@ fn format_chown_shell_hint(path: &SandboxPath, uid: Option<u32>, gid: Option<u32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    from = "SerializedPendingMetadataRequest",
+    into = "SerializedPendingMetadataRequest"
+)]
 pub struct PendingMetadataRequest {
     pub id: u64,
     pub sandbox: String,
@@ -424,6 +429,56 @@ pub struct PendingMetadataRequest {
     pub uid: u32,
     pub gid: u32,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedPendingMetadataRequest {
+    pub id: u64,
+    pub sandbox: String,
+    pub attach_id: Option<u64>,
+    pub operation: MetadataOperation,
+    pub kinds: Vec<PendingOperationKind>,
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub description: String,
+}
+
+impl From<PendingMetadataRequest> for SerializedPendingMetadataRequest {
+    fn from(request: PendingMetadataRequest) -> Self {
+        Self {
+            id: request.id,
+            sandbox: request.sandbox,
+            attach_id: request.attach_id,
+            operation: request.operation,
+            kinds: request.kinds,
+            pid: request.pid,
+            uid: request.uid,
+            gid: request.gid,
+            description: request.description,
+        }
+    }
+}
+
+impl From<SerializedPendingMetadataRequest> for PendingMetadataRequest {
+    fn from(request: SerializedPendingMetadataRequest) -> Self {
+        let object = MetadataObjectKey {
+            layer_id: 0,
+            relative_path: PathBuf::new(),
+        };
+        Self {
+            id: request.id,
+            sandbox: request.sandbox,
+            attach_id: request.attach_id,
+            operation: request.operation,
+            object,
+            kinds: request.kinds,
+            pid: request.pid,
+            uid: request.uid,
+            gid: request.gid,
+            description: request.description,
+        }
+    }
 }
 
 impl PendingMetadataRequest {
@@ -761,15 +816,6 @@ enum OverlayEntry<'a> {
     Hide(&'a HideRule),
 }
 
-impl OverlayEntry<'_> {
-    fn id(self) -> u64 {
-        match self {
-            Self::Layer(layer) => layer.id,
-            Self::Hide(hide) => hide.id,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverlayResolution {
     Real {
@@ -976,17 +1022,17 @@ impl Sandbox {
     }
 
     fn newest_covering_entry(&self, path: &SandboxPath) -> Option<OverlayEntry<'_>> {
-        self.layers
+        let layer_entries = self
+            .layers
             .iter()
             .filter(|layer| path.starts_with(&layer.on_fs))
-            .map(OverlayEntry::Layer)
-            .chain(
-                self.hides
-                    .iter()
-                    .filter(|hide| path.starts_with(&hide.path))
-                    .map(OverlayEntry::Hide),
-            )
-            .max_by_key(|entry| entry.id())
+            .map(|layer| (layer.id, OverlayEffect::Value(OverlayEntry::Layer(layer))));
+        let hide_entries = self
+            .hides
+            .iter()
+            .filter(|hide| path.starts_with(&hide.path))
+            .map(|hide| (hide.id, OverlayEffect::Value(OverlayEntry::Hide(hide))));
+        collapse_latest(layer_entries.chain(hide_entries))
     }
 
     fn newest_covering_layer(&self, path: &SandboxPath) -> Option<&MountLayer> {
@@ -1065,9 +1111,19 @@ impl Sandbox {
         }
     }
 
-    pub fn metadata_override_for_path(&self, path: &SandboxPath) -> Option<&MetadataOverride> {
+    pub fn metadata_override_for_path(&self, path: &SandboxPath) -> Option<MetadataOverride> {
         let key = self.metadata_object_key(path)?;
-        self.metadata.get(&key).map(|entry| &entry.override_)
+        let entries = self
+            .metadata
+            .iter()
+            .filter(|(entry_key, _)| *entry_key == &key)
+            .map(|(entry_key, entry)| {
+                (
+                    entry_key.layer_id,
+                    OverlayEffect::Value(entry.override_.clone()),
+                )
+            });
+        collapse_latest(entries)
     }
 
     pub fn apply_metadata_override(&mut self, op: &MetadataOperation) -> Result<()> {
@@ -1974,6 +2030,36 @@ mod tests {
             ),
             GrantMatchOutcome::NotMatched
         );
+    }
+
+    #[test]
+    fn pending_metadata_serialization_hides_internal_object_key() {
+        let operation = MetadataOperation::Chmod {
+            path: SandboxPath::new("/data/file").unwrap(),
+            mode: 0o444,
+        };
+        let request = PendingRequest::Metadata(PendingMetadataRequest {
+            id: 2,
+            sandbox: "s".to_string(),
+            attach_id: None,
+            operation: operation.clone(),
+            object: MetadataObjectKey {
+                layer_id: 99,
+                relative_path: PathBuf::from("private/relative"),
+            },
+            kinds: operation.pending_kinds(),
+            pid: 123,
+            uid: 1000,
+            gid: 1000,
+            description: operation.description(),
+        });
+
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("object"));
+        assert!(!json.contains("layer_id"));
+        assert!(!json.contains("relative_path"));
+        assert!(!json.contains("private/relative"));
+        assert!(json.contains("/data/file"));
     }
 
     #[test]

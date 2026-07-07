@@ -154,7 +154,7 @@ impl SandboxFs {
         attr.ino = self.remember(path);
         Ok(apply_override(
             attr,
-            sandbox.metadata_override_for_path(path),
+            sandbox.metadata_override_for_path(path).as_ref(),
         ))
     }
 

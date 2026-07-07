@@ -3,6 +3,7 @@ pub mod fs;
 pub mod hostfs;
 pub mod ipc;
 pub mod log;
+pub mod overlay;
 pub mod path;
 pub mod process_info;
 pub mod runtime;
