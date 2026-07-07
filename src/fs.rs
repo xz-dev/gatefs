@@ -1072,6 +1072,81 @@ impl Filesystem for SandboxFs {
         }
     }
 
+    fn mknod(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        let Ok(path) = self.path_child(parent, name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Mknod { path },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
+            Err(err) => reply.error(err),
+        }
+    }
+
+    fn symlink(
+        &self,
+        req: &Request,
+        parent: INodeNo,
+        link_name: &OsStr,
+        _target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let Ok(path) = self.path_child(parent, link_name) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Symlink { path },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
+            Err(err) => reply.error(err),
+        }
+    }
+
+    fn link(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        newparent: INodeNo,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let Some(from) = self.path_for_ino(ino) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let Ok(to) = self.path_child(newparent, newname) else {
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Link { from, to },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => reply.error(Errno::EROFS),
+            Ok(ReadWriteDecision::Denied) => reply.error(Errno::EACCES),
+            Ok(ReadWriteDecision::Canceled) => reply.error(Errno::ECANCELED),
+            Err(err) => reply.error(err),
+        }
+    }
+
     fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let Ok(path) = self.path_child(parent, name) else {
             reply.error(Errno::ENOENT);
@@ -1685,6 +1760,56 @@ mod tests {
 
         let id = wait_for_pending_read_write(&registry);
         resolve_pending_read_write(&registry, id, PendingDecision::DoNothing);
+        assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Proceed);
+        writer.shutdown().unwrap();
+    }
+
+    #[test]
+    fn protected_link_queues_when_either_side_is_protected() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("logs/demo.log");
+        let registry = registry_with_file(&temp, log_path);
+        registry
+            .lock()
+            .unwrap()
+            .sandboxes
+            .get_mut("demo")
+            .unwrap()
+            .protect(
+                ProtectionKind::Write,
+                SandboxPath::new("/data/new-link").unwrap(),
+            );
+        let writer = log::LogWriter::new();
+        let fs = SandboxFs::new("demo", Arc::clone(&registry), writer.handle());
+
+        let worker = {
+            let fs = fs.clone();
+            thread::spawn(move || {
+                fs.authorize_read_write(
+                    RequestIdentity {
+                        pid: 123,
+                        uid: 1000,
+                        gid: 1000,
+                    },
+                    ReadWriteOperation::Link {
+                        from: SandboxPath::new("/data/file").unwrap(),
+                        to: SandboxPath::new("/data/new-link").unwrap(),
+                    },
+                )
+            })
+        };
+
+        let id = wait_for_pending_read_write(&registry);
+        {
+            let registry = registry.lock().unwrap();
+            let pending = registry.pending_read_write.get(&id).unwrap();
+            assert_eq!(pending.path, SandboxPath::new("/data/new-link").unwrap());
+            assert_eq!(
+                pending.description,
+                "path=/data/file WRITE link to=/data/new-link"
+            );
+        }
+        resolve_pending_read_write(&registry, id, PendingDecision::Apply);
         assert_eq!(worker.join().unwrap().unwrap(), ReadWriteDecision::Proceed);
         writer.shutdown().unwrap();
     }

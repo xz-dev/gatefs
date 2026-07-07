@@ -741,6 +741,128 @@ fn stress_multiple_pending_viewers_do_not_consume_request() {
 
 #[test]
 #[ignore]
+fn protected_symlink_write_intent_is_gated_without_host_mutation() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_symlink_write");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-write", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut child = std::process::Command::new("ln")
+        .args(["-s", "file", mountpoint.join("data/link").to_str().unwrap()])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(3), || {
+        session
+            .sandbox_cmd()
+            .arg("allow")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("WRITE symlink"))
+            .unwrap_or(false)
+    }));
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    let id = pending.split_whitespace().next().unwrap().to_string();
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    assert!(!wait_child(&mut child).success());
+    assert!(!local.join("link").exists());
+
+    let log = session_log(&session);
+    assert_log_line_contains(&log, &[" pending ", "path=/data/link WRITE symlink"]);
+    assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
+}
+
+#[test]
+#[ignore]
+fn protected_hardlink_write_intent_is_gated_without_host_mutation() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_hardlink_write");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-write", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut child = std::process::Command::new("ln")
+        .args([
+            mountpoint.join("data/file").to_str().unwrap(),
+            mountpoint.join("data/hard").to_str().unwrap(),
+        ])
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(3), || {
+        session
+            .sandbox_cmd()
+            .arg("allow")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("WRITE link"))
+            .unwrap_or(false)
+    }));
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    let id = pending.split_whitespace().next().unwrap().to_string();
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    assert!(!wait_child(&mut child).success());
+    assert!(!local.join("hard").exists());
+
+    let log = session_log(&session);
+    assert_log_line_contains(
+        &log,
+        &[" pending ", "path=/data/file WRITE link to=/data/hard"],
+    );
+    assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
+}
+
+#[test]
+#[ignore]
 fn direct_chmod_pending_can_be_allowed_denied_or_do_nothing() {
     require_fuse();
     if !fuse_enabled() {

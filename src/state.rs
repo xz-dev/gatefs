@@ -94,6 +94,9 @@ pub enum ReadWriteOperation {
     Truncate { path: SandboxPath },
     Create { path: SandboxPath },
     Mkdir { path: SandboxPath },
+    Mknod { path: SandboxPath },
+    Symlink { path: SandboxPath },
+    Link { from: SandboxPath, to: SandboxPath },
     Unlink { path: SandboxPath },
     Rmdir { path: SandboxPath },
     Rename { from: SandboxPath, to: SandboxPath },
@@ -108,6 +111,9 @@ impl ReadWriteOperation {
             | Self::Truncate { .. }
             | Self::Create { .. }
             | Self::Mkdir { .. }
+            | Self::Mknod { .. }
+            | Self::Symlink { .. }
+            | Self::Link { .. }
             | Self::Unlink { .. }
             | Self::Rmdir { .. }
             | Self::Rename { .. } => ProtectionKind::Write,
@@ -123,15 +129,17 @@ impl ReadWriteOperation {
             | Self::Truncate { path }
             | Self::Create { path }
             | Self::Mkdir { path }
+            | Self::Mknod { path }
+            | Self::Symlink { path }
             | Self::Unlink { path }
             | Self::Rmdir { path } => path,
-            Self::Rename { from, .. } => from,
+            Self::Link { from, .. } | Self::Rename { from, .. } => from,
         }
     }
 
     pub fn protection_paths(&self) -> Vec<&SandboxPath> {
         match self {
-            Self::Rename { from, to } => vec![from, to],
+            Self::Link { from, to } | Self::Rename { from, to } => vec![from, to],
             _ => vec![self.path()],
         }
     }
@@ -149,6 +157,9 @@ impl ReadWriteOperation {
             Self::Truncate { path } => format!("path={path} WRITE truncate"),
             Self::Create { path } => format!("path={path} WRITE create"),
             Self::Mkdir { path } => format!("path={path} WRITE mkdir"),
+            Self::Mknod { path } => format!("path={path} WRITE mknod"),
+            Self::Symlink { path } => format!("path={path} WRITE symlink"),
+            Self::Link { from, to } => format!("path={from} WRITE link to={to}"),
             Self::Unlink { path } => format!("path={path} WRITE unlink"),
             Self::Rmdir { path } => format!("path={path} WRITE rmdir"),
             Self::Rename { from, to } => format!("path={from} WRITE rename to={to}"),
