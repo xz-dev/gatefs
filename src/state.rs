@@ -745,6 +745,35 @@ pub enum ResolvedPath {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+enum OverlayEntry<'a> {
+    Layer(&'a MountLayer),
+    Hide(&'a HideRule),
+}
+
+impl OverlayEntry<'_> {
+    fn id(self) -> u64 {
+        match self {
+            Self::Layer(layer) => layer.id,
+            Self::Hide(hide) => hide.id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OverlayResolution {
+    Real {
+        local_path: PathBuf,
+        layer_id: u64,
+        sandbox_path: SandboxPath,
+    },
+    VirtualDir {
+        sandbox_path: SandboxPath,
+    },
+    Hidden,
+    Missing,
+}
+
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     pub name: String,
@@ -861,48 +890,107 @@ impl Sandbox {
     }
 
     pub fn is_hidden(&self, path: &SandboxPath) -> bool {
-        let newest_covering_layer = self
-            .layers
-            .iter()
-            .filter(|layer| path.starts_with(&layer.on_fs))
-            .map(|layer| layer.id)
-            .max()
-            .unwrap_or(0);
-        self.hides
-            .iter()
-            .any(|hide| path.starts_with(&hide.path) && hide.id > newest_covering_layer)
+        matches!(self.resolve_overlay(path), OverlayResolution::Hidden)
     }
 
     pub fn resolve(&self, path: &SandboxPath) -> Option<ResolvedPath> {
-        if self.is_hidden(path) {
-            return None;
-        }
-        for layer in self.layers.iter().rev() {
-            if path.starts_with(&layer.on_fs) {
-                let rest = path.strip_prefix(&layer.on_fs).ok()?;
-                return Some(ResolvedPath::Real {
-                    local_path: layer.local.join(rest),
-                    layer_id: layer.id,
-                    sandbox_path: path.clone(),
-                });
+        match self.resolve_overlay(path) {
+            OverlayResolution::Real {
+                local_path,
+                layer_id,
+                sandbox_path,
+            } => Some(ResolvedPath::Real {
+                local_path,
+                layer_id,
+                sandbox_path,
+            }),
+            OverlayResolution::VirtualDir { sandbox_path } => {
+                Some(ResolvedPath::VirtualDir { sandbox_path })
             }
-        }
-        if self.is_virtual_dir(path) {
-            Some(ResolvedPath::VirtualDir {
-                sandbox_path: path.clone(),
-            })
-        } else {
-            None
+            OverlayResolution::Hidden | OverlayResolution::Missing => None,
         }
     }
 
     pub fn is_virtual_dir(&self, path: &SandboxPath) -> bool {
+        matches!(
+            self.resolve_overlay(path),
+            OverlayResolution::VirtualDir { .. }
+        )
+    }
+
+    fn resolve_overlay(&self, path: &SandboxPath) -> OverlayResolution {
         if path.as_path() == Path::new("/") {
-            return true;
+            if let Some(layer) = self.newest_covering_layer(path) {
+                return self.real_resolution(path, layer);
+            }
+            return OverlayResolution::VirtualDir {
+                sandbox_path: path.clone(),
+            };
         }
+
+        let newest_covering = self.newest_covering_entry(path);
+        let newest_descendant_layer = self.newest_descendant_layer(path);
+
+        match newest_covering {
+            Some(OverlayEntry::Layer(layer)) => self.real_resolution(path, layer),
+            Some(OverlayEntry::Hide(hide)) => {
+                if newest_descendant_layer.is_some_and(|layer| layer.id > hide.id) {
+                    OverlayResolution::VirtualDir {
+                        sandbox_path: path.clone(),
+                    }
+                } else {
+                    OverlayResolution::Hidden
+                }
+            }
+            None => {
+                if newest_descendant_layer.is_some() {
+                    OverlayResolution::VirtualDir {
+                        sandbox_path: path.clone(),
+                    }
+                } else {
+                    OverlayResolution::Missing
+                }
+            }
+        }
+    }
+
+    fn real_resolution(&self, path: &SandboxPath, layer: &MountLayer) -> OverlayResolution {
+        let Ok(rest) = path.strip_prefix(&layer.on_fs) else {
+            return OverlayResolution::Missing;
+        };
+        OverlayResolution::Real {
+            local_path: layer.local.join(rest),
+            layer_id: layer.id,
+            sandbox_path: path.clone(),
+        }
+    }
+
+    fn newest_covering_entry(&self, path: &SandboxPath) -> Option<OverlayEntry<'_>> {
         self.layers
             .iter()
-            .any(|layer| layer.on_fs.starts_with(path) && &layer.on_fs != path)
+            .filter(|layer| path.starts_with(&layer.on_fs))
+            .map(OverlayEntry::Layer)
+            .chain(
+                self.hides
+                    .iter()
+                    .filter(|hide| path.starts_with(&hide.path))
+                    .map(OverlayEntry::Hide),
+            )
+            .max_by_key(|entry| entry.id())
+    }
+
+    fn newest_covering_layer(&self, path: &SandboxPath) -> Option<&MountLayer> {
+        self.layers
+            .iter()
+            .filter(|layer| path.starts_with(&layer.on_fs))
+            .max_by_key(|layer| layer.id)
+    }
+
+    fn newest_descendant_layer(&self, path: &SandboxPath) -> Option<&MountLayer> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.on_fs.starts_with(path) && &layer.on_fs != path)
+            .max_by_key(|layer| layer.id)
     }
 
     pub fn children(&self, dir: &SandboxPath) -> Result<BTreeMap<String, ResolvedPath>> {
@@ -1383,6 +1471,100 @@ mod tests {
         assert!(s.resolve(&SandboxPath::new("/a").unwrap()).is_none());
         s.add_layer(t2.path(), SandboxPath::new("/a").unwrap());
         assert!(s.resolve(&SandboxPath::new("/a").unwrap()).is_some());
+    }
+
+    #[test]
+    fn later_nested_layers_create_virtual_ancestors_through_hidden_parent() {
+        let root = TempDir::new().unwrap();
+        let pi = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("root")).unwrap();
+        std::fs::create_dir(root.path().join("root/Code")).unwrap();
+        let mut s = Sandbox::new("s", root.path().join("s.log"));
+        s.add_layer(root.path(), SandboxPath::new("/").unwrap());
+        s.add_hide(SandboxPath::new("/root").unwrap());
+        s.add_layer(pi.path(), SandboxPath::new("/root/.pi").unwrap());
+        s.add_layer(cwd.path(), SandboxPath::new("/root/ai/sandbox-fs").unwrap());
+
+        assert!(matches!(
+            s.resolve(&SandboxPath::new("/root").unwrap()),
+            Some(ResolvedPath::VirtualDir { .. })
+        ));
+        assert!(matches!(
+            s.resolve(&SandboxPath::new("/root/ai").unwrap()),
+            Some(ResolvedPath::VirtualDir { .. })
+        ));
+        assert!(matches!(
+            s.resolve(&SandboxPath::new("/root/.pi").unwrap()),
+            Some(ResolvedPath::Real { .. })
+        ));
+        assert!(matches!(
+            s.resolve(&SandboxPath::new("/root/ai/sandbox-fs").unwrap()),
+            Some(ResolvedPath::Real { .. })
+        ));
+        assert!(
+            s.resolve(&SandboxPath::new("/root/Code").unwrap())
+                .is_none()
+        );
+
+        let root_children = s.children(&SandboxPath::new("/root").unwrap()).unwrap();
+        assert_eq!(
+            root_children.keys().cloned().collect::<Vec<_>>(),
+            vec![".pi".to_string(), "ai".to_string()]
+        );
+        let ai_children = s.children(&SandboxPath::new("/root/ai").unwrap()).unwrap();
+        assert_eq!(
+            ai_children.keys().cloned().collect::<Vec<_>>(),
+            vec!["sandbox-fs".to_string()]
+        );
+    }
+
+    #[test]
+    fn virtual_ancestors_through_hidden_parent_disappear_as_layers_unwind() {
+        let root = TempDir::new().unwrap();
+        let pi = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let mut s = Sandbox::new("s", root.path().join("s.log"));
+        s.add_layer(root.path(), SandboxPath::new("/").unwrap());
+        s.add_hide(SandboxPath::new("/root").unwrap());
+        s.add_layer(pi.path(), SandboxPath::new("/root/.pi").unwrap());
+        s.add_layer(cwd.path(), SandboxPath::new("/root/ai/sandbox-fs").unwrap());
+
+        assert!(s.remove_layer(&SandboxPath::new("/root/ai/sandbox-fs").unwrap()));
+        assert!(matches!(
+            s.resolve(&SandboxPath::new("/root").unwrap()),
+            Some(ResolvedPath::VirtualDir { .. })
+        ));
+        assert!(s.resolve(&SandboxPath::new("/root/ai").unwrap()).is_none());
+
+        assert!(s.remove_layer(&SandboxPath::new("/root/.pi").unwrap()));
+        assert!(s.resolve(&SandboxPath::new("/root").unwrap()).is_none());
+    }
+
+    #[test]
+    fn remounting_same_path_unwinds_like_a_stack() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        std::fs::write(first.path().join("x"), "first").unwrap();
+        std::fs::write(second.path().join("x"), "second").unwrap();
+        let mut s = Sandbox::new("s", first.path().join("s.log"));
+        s.add_layer(first.path(), SandboxPath::new("/mnt").unwrap());
+        s.add_layer(second.path(), SandboxPath::new("/mnt").unwrap());
+
+        match s.resolve(&SandboxPath::new("/mnt/x").unwrap()).unwrap() {
+            ResolvedPath::Real { local_path, .. } => {
+                assert_eq!(std::fs::read_to_string(local_path).unwrap(), "second")
+            }
+            _ => panic!("expected real"),
+        }
+
+        assert!(s.remove_layer(&SandboxPath::new("/mnt").unwrap()));
+        match s.resolve(&SandboxPath::new("/mnt/x").unwrap()).unwrap() {
+            ResolvedPath::Real { local_path, .. } => {
+                assert_eq!(std::fs::read_to_string(local_path).unwrap(), "first")
+            }
+            _ => panic!("expected real"),
+        }
     }
 
     #[test]
