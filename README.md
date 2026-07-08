@@ -13,9 +13,20 @@ The initial design target is AI agents: they are unusually dynamic, tool-heavy, 
 Prerequisites:
 
 - Rust 1.88 or newer.
-- Linux FUSE support, including `/dev/fuse` and `fusermount3`, for real mount tests and normal FUSE use.
+- Linux FUSE support, including `/dev/fuse` and `fusermount3`, for normal FUSE use.
 
-Build locally:
+For normal use, install directly from GitHub into Cargo's bin directory:
+
+```sh
+cargo install --git https://github.com/xz-dev/sandboxfs.git sandboxfs
+```
+
+This installs:
+
+- `sandboxfs`
+- `sandboxfs-access-tui`
+
+For development, clone the repository and build locally:
 
 ```sh
 git clone https://github.com/xz-dev/sandboxfs.git
@@ -23,16 +34,11 @@ cd sandboxfs
 cargo build --release
 ```
 
-Install the binaries into Cargo's bin directory:
+To install a local development checkout:
 
 ```sh
 cargo install --path .
 ```
-
-This installs:
-
-- `sandboxfs`
-- `sandboxfs-access-tui`
 
 ## Quick start
 
