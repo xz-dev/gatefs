@@ -1,6 +1,6 @@
 # gatefs
 
-`gatefs` is an experimental, observable filesystem protection shim built on [`fuser`](https://github.com/cberner/fuser). It gives a process a FUSE-backed filesystem view whose read, write, and metadata permissions can be inspected, protected, granted, denied, and adjusted at runtime.
+`gatefs` is an experimental, observable filesystem protection shim built on [`fuser`](https://github.com/cberner/fuser). It gives a process a FUSE-backed filesystem view whose read, write, and metadata permissions can be inspected, protected, granted, denied, and adjusted at runtime. It is designed for sandboxes that need filesystem composition as free as `mount --bind`, with runtime authorization and background audit trails rooted in the design.
 
 It is designed to complement existing sandboxing tools such as Bubblewrap, containers, or VM-based runners, not to replace them. Those tools still provide the process boundary; `gatefs` adds the dynamic filesystem policy layer that static bind mounts and read-only mounts do not provide.
 
