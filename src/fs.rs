@@ -1372,13 +1372,19 @@ impl Filesystem for SandboxFs {
                 return;
             }
         };
-        match OpenOptions::new()
-            .create(true)
-            .truncate(flags & libc::O_TRUNC != 0)
-            .append(flags & libc::O_APPEND != 0)
+        let exclusive = flags & libc::O_EXCL != 0;
+        let mut options = OpenOptions::new();
+        options
             .write(true)
             .read(flags & libc::O_ACCMODE == libc::O_RDWR)
-            .mode(mode & 0o7777)
+            .append(flags & libc::O_APPEND != 0)
+            .mode(mode & 0o7777);
+        if exclusive {
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(flags & libc::O_TRUNC != 0);
+        }
+        match options
             .open(&local_path)
             .and_then(|_| real_attr(&path, &local_path))
         {
