@@ -2,9 +2,9 @@
 
 ## Status
 
-Accepted, partially superseded by [ADR 0007](0007-bypass-and-effect-based-authorization.md).
+Accepted, partially superseded by [ADR 0004](0004-xattr-passthrough-policy.md) and [ADR 0007](0007-bypass-and-effect-based-authorization.md).
 
-ADR 0007 supersedes this ADR's `passthrough-*` naming and the intentionally narrow `passthrough-write` behavior. ADR 0004 and ADR 0007 also supersede this ADR's historical xattr/default-metadata forwarding assumptions: current xattr mutations are forwarded to the backing filesystem when metadata policy allows them, not only when matched by the historical `passthrough-metadata` rule. The layer split and glob pattern semantics remain applicable.
+ADR 0004 and ADR 0007 supersede this ADR's historical xattr/default-metadata assumptions. In particular, xattr forwarding is governed by the current metadata policy model (not by the narrow historical `passthrough-metadata` path), and this ADR's prior wording should be read as historical context. The layer split and glob pattern semantics remain applicable.
 
 ## Context
 
