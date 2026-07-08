@@ -1,6 +1,10 @@
 # sandboxfs
 
-`sandboxfs` is an experimental, in-memory overlay sandbox filesystem built on [`fuser`](https://github.com/cberner/fuser).
+`sandboxfs` is an experimental, observable filesystem protection shim built on [`fuser`](https://github.com/cberner/fuser). It gives a process a FUSE-backed filesystem view whose read, write, and metadata permissions can be inspected, protected, granted, denied, and adjusted at runtime.
+
+It is designed to complement existing sandboxing tools such as Bubblewrap, containers, or VM-based runners, not to replace them. Those tools still provide the process boundary; `sandboxfs` adds the dynamic filesystem policy layer that static bind mounts and read-only mounts do not provide.
+
+The initial design target is AI agents: they are unusually dynamic, tool-heavy, and hard to predict ahead of time, so static filesystem permissions are often either too broad to be useful or too narrow to let the agent finish the task. `sandboxfs` focuses on observability and controllability for that workflow: host paths are presented through sandbox paths, sensitive operations can become pending authorization requests, and decisions are logged against the sandbox view rather than leaking host-specific details into ordinary prompts.
 
 The important lifecycle rule is explicit foreground ownership: a sandbox exists only while a visible `sandboxfs run <name>` process is running. There is no hidden `sandboxfsd`, no automatic daemon startup, and no global `list` command.
 
@@ -20,6 +24,15 @@ sandboxfs demo mount /some/local/dir /
 sandboxfs demo attach "$DEMO_MNT"
 ls "$DEMO_MNT"
 cat "$DEMO_MNT/file.txt"
+```
+
+Add a protection rule when an operation should be observable and adjustable at runtime:
+
+```sh
+sandboxfs demo protect-write '/**'
+echo updated > "$DEMO_MNT/file.txt" # blocks and creates a pending request
+sandboxfs demo allow
+sandboxfs demo allow <operation_id>
 ```
 
 Unmount one attach point:
@@ -131,6 +144,10 @@ Read/write protection rules are configured separately with `protect-read`, `prot
 
 The TUI displays pending requests and supports allow, deny, do-nothing, and edit-command. Edit-command reruns a user-edited `chmod`, `chown`, or `chattr` through the trusted `sandboxfs` CLI path, then releases the original pending request with do-nothing. Read/write TUI allow/deny/do-nothing resolves only the selected pending request and does not create broader grants.
 
+## AI agent wrapper example
+
+`example/pi-sandbox.sh` shows the intended integration shape for an AI coding agent: use Bubblewrap for the process/container boundary, then put `sandboxfs` inside that boundary as the observable filesystem policy layer. The wrapper keeps the agent-facing view simple while allowing selected paths, PATH tools, lock directories, and protected operations to be managed through `sandboxfs` policy instead of static bind mounts alone.
+
 ## Logs and monitoring
 
 Show the operation log:
@@ -166,6 +183,7 @@ The log writer is a serialized event loop. FUSE and control paths publish events
 
 ## Current limitations
 
+- `sandboxfs` is not a complete process sandbox or security boundary by itself; use it with an existing sandboxing or runtime isolation tool when process isolation is required.
 - File content and directory structure writes are read-only unless a path matches an explicit passthrough rule for a supported operation. In this version, `passthrough-write` enables lock-directory mkdir/rmdir passthrough, and `passthrough-metadata` enables timestamp and xattr metadata passthrough for matching visible paths. Other create/write/truncate/unlink/rename operations still return read-only or unsupported errors and never modify underlying files.
 - Real FUSE behavior depends on `/dev/fuse` and `fusermount3` availability and permissions.
 - The project is experimental.
