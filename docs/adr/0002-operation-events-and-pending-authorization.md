@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-`sandboxfs` exposes a foreground, in-memory sandbox through FUSE. Metadata changes requested through an attached FUSE mount can come from untrusted tools, so they become pending authorization requests. The first implementation used shell-like descriptions such as `chmod 444 /data/file`, wrote log lines directly from several call sites, and blocked the FUSE handler thread while waiting for a user decision.
+`gatefs` exposes a foreground, in-memory sandbox through FUSE. Metadata changes requested through an attached FUSE mount can come from untrusted tools, so they become pending authorization requests. The first implementation used shell-like descriptions such as `chmod 444 /data/file`, wrote log lines directly from several call sites, and blocked the FUSE handler thread while waiting for a user decision.
 
 That design had three problems:
 
@@ -70,7 +70,7 @@ Pending inspection is read-only. Multiple CLI control commands or Access TUI ins
 
 ### Ext4-like metadata effects on open files
 
-`sandboxfs` should mimic ext4 metadata behavior as closely as practical:
+`gatefs` should mimic ext4 metadata behavior as closely as practical:
 
 - `chmod`/`chown` changes do not revoke already-open file descriptors.
 - New opens observe allowed/applied metadata overrides.

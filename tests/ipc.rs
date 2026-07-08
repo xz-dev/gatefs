@@ -11,7 +11,7 @@ use predicates::prelude::*;
 use serde_json::json;
 use tempfile::TempDir;
 
-use common::{RunningSession, sandboxfs_cmd_for};
+use common::{RunningSession, gatefs_cmd_for};
 
 #[test]
 fn malformed_ipc_request_returns_error_and_session_keeps_running() {
@@ -31,26 +31,26 @@ fn socket_override_selects_explicit_session_socket() {
     let runtime = temp.path().join("run");
     let log_dir = temp.path().join("logs");
     let socket = temp.path().join("custom.sock");
-    let mut child = std::process::Command::cargo_bin("sandboxfs")
+    let mut child = std::process::Command::cargo_bin("gatefs")
         .unwrap()
         .args(["run", "demo_ipc_socket_override"])
-        .env("SANDBOXFS_RUNTIME_DIR", &runtime)
-        .env("SANDBOXFS_LOG_DIR", &log_dir)
-        .env("SANDBOXFS_SOCKET", &socket)
+        .env("GATEFS_RUNTIME_DIR", &runtime)
+        .env("GATEFS_LOG_DIR", &log_dir)
+        .env("GATEFS_SOCKET", &socket)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
     common::wait_for_socket(&socket);
 
-    sandboxfs_cmd_for(&runtime, &log_dir)
-        .env("SANDBOXFS_SOCKET", &socket)
+    gatefs_cmd_for(&runtime, &log_dir)
+        .env("GATEFS_SOCKET", &socket)
         .args(["demo_ipc_socket_override", "mount"])
         .assert()
         .success();
 
-    sandboxfs_cmd_for(&runtime, &log_dir)
-        .env("SANDBOXFS_SOCKET", &socket)
+    gatefs_cmd_for(&runtime, &log_dir)
+        .env("GATEFS_SOCKET", &socket)
         .args(["demo_ipc_socket_override", "destroy"])
         .assert()
         .success();
@@ -78,7 +78,7 @@ fn invalid_session_name_does_not_leave_stale_socket() {
     let log_dir = temp.path().join("logs");
     let socket = runtime.join("bad/name.sock");
 
-    sandboxfs_cmd_for(&runtime, &log_dir)
+    gatefs_cmd_for(&runtime, &log_dir)
         .args(["run", "bad/name"])
         .assert()
         .failure()
@@ -120,7 +120,7 @@ fn concurrent_pending_viewers_do_not_consume_socket_state() {
         let log_dir = log_dir.clone();
         let name = name.clone();
         viewers.push(std::thread::spawn(move || {
-            let output = sandboxfs_cmd_for(&runtime, &log_dir)
+            let output = gatefs_cmd_for(&runtime, &log_dir)
                 .args([name.as_str(), "allow"])
                 .output()
                 .unwrap();

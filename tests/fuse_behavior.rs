@@ -10,11 +10,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use assert_cmd::prelude::*;
 
-use common::{RunningSession, sandboxfs_cmd_for, wait_until};
+use common::{RunningSession, gatefs_cmd_for, wait_until};
 
 fn require_fuse() {
-    if std::env::var_os("SANDBOXFS_RUN_FUSE_TESTS").is_none() {
-        eprintln!("set SANDBOXFS_RUN_FUSE_TESTS=1 to run real FUSE tests");
+    if std::env::var_os("GATEFS_RUN_FUSE_TESTS").is_none() {
+        eprintln!("set GATEFS_RUN_FUSE_TESTS=1 to run real FUSE tests");
         return;
     }
     assert!(
@@ -31,17 +31,17 @@ fn require_fuse() {
 }
 
 fn fuse_enabled() -> bool {
-    std::env::var_os("SANDBOXFS_RUN_FUSE_TESTS").is_some()
+    std::env::var_os("GATEFS_RUN_FUSE_TESTS").is_some()
 }
 
 fn require_stress() {
-    if std::env::var_os("SANDBOXFS_RUN_STRESS_TESTS").is_none() {
-        eprintln!("set SANDBOXFS_RUN_STRESS_TESTS=1 to run FUSE stress tests");
+    if std::env::var_os("GATEFS_RUN_STRESS_TESTS").is_none() {
+        eprintln!("set GATEFS_RUN_STRESS_TESTS=1 to run FUSE stress tests");
     }
 }
 
 fn stress_enabled() -> bool {
-    std::env::var_os("SANDBOXFS_RUN_STRESS_TESTS").is_some()
+    std::env::var_os("GATEFS_RUN_STRESS_TESTS").is_some()
 }
 
 fn require_command(name: &str) {
@@ -1047,7 +1047,7 @@ fn stress_multiple_pending_viewers_do_not_consume_request() {
         let name = name.clone();
         let id = id.clone();
         viewers.push(std::thread::spawn(move || {
-            let output = sandboxfs_cmd_for(&runtime, &log_dir)
+            let output = gatefs_cmd_for(&runtime, &log_dir)
                 .args([name.as_str(), "allow"])
                 .output()
                 .unwrap();

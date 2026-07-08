@@ -7,11 +7,11 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-use common::{RunningSession, sandboxfs_cmd_for};
+use common::{RunningSession, gatefs_cmd_for};
 
 #[test]
 fn help_exposes_run_but_not_create_or_list() {
-    std::process::Command::cargo_bin("sandboxfs")
+    std::process::Command::cargo_bin("gatefs")
         .unwrap()
         .arg("--help")
         .assert()
@@ -24,11 +24,11 @@ fn help_exposes_run_but_not_create_or_list() {
 #[test]
 fn control_command_fails_without_foreground_session() {
     let temp = TempDir::new().unwrap();
-    sandboxfs_cmd_for(&temp.path().join("run"), &temp.path().join("logs"))
+    gatefs_cmd_for(&temp.path().join("run"), &temp.path().join("logs"))
         .args(["missing", "mount"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("sandboxfs run missing"));
+        .stderr(predicate::str::contains("gatefs run missing"));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! fuser filesystem implementation for sandboxfs.
+//! fuser filesystem implementation for gatefs.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};

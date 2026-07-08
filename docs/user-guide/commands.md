@@ -1,40 +1,40 @@
 # Command reference
 
 ```text
-sandboxfs run <name>
-sandboxfs <name> destroy
-sandboxfs <name> attach <mountpoint>
-sandboxfs <name> detach <mountpoint>
-sandboxfs <name> mount <local> <on_fs>
-sandboxfs <name> mount
-sandboxfs <name> umount <on_fs>
-sandboxfs <name> hide <on_fs>
-sandboxfs <name> protect-read <pattern>
-sandboxfs <name> protect-write <pattern>
-sandboxfs <name> protect-metadata <pattern>
-sandboxfs <name> unprotect-read <pattern>
-sandboxfs <name> unprotect-write <pattern>
-sandboxfs <name> unprotect-metadata <pattern>
-sandboxfs <name> bypass-read <pattern>
-sandboxfs <name> bypass-write <pattern>
-sandboxfs <name> bypass-metadata <pattern>
-sandboxfs <name> unbypass-read <pattern>
-sandboxfs <name> unbypass-write <pattern>
-sandboxfs <name> unbypass-metadata <pattern>
-sandboxfs <name> list-protection [--read] [--write] [--metadata]
-sandboxfs <name> list-bypass [--read] [--write] [--metadata]
-sandboxfs <name> chmod ...
-sandboxfs <name> chown ...
-sandboxfs <name> chattr ...
-sandboxfs <name> allow [operation_id]
-sandboxfs <name> allow <operation_id> [--path <sandbox-glob>] [--duration[=<duration>]] [--tree]
-sandboxfs <name> allow --do-nothing <operation_id>
-sandboxfs <name> deny <operation_id>
-sandboxfs <name> cancel <operation_id>
-sandboxfs <name> cancel-all [mountpoint]
-sandboxfs <name> monitor [-f]
-sandboxfs <name> metadata
-sandboxfs-access-tui <name>
+gatefs run <name>
+gatefs <name> destroy
+gatefs <name> attach <mountpoint>
+gatefs <name> detach <mountpoint>
+gatefs <name> mount <local> <on_fs>
+gatefs <name> mount
+gatefs <name> umount <on_fs>
+gatefs <name> hide <on_fs>
+gatefs <name> protect-read <pattern>
+gatefs <name> protect-write <pattern>
+gatefs <name> protect-metadata <pattern>
+gatefs <name> unprotect-read <pattern>
+gatefs <name> unprotect-write <pattern>
+gatefs <name> unprotect-metadata <pattern>
+gatefs <name> bypass-read <pattern>
+gatefs <name> bypass-write <pattern>
+gatefs <name> bypass-metadata <pattern>
+gatefs <name> unbypass-read <pattern>
+gatefs <name> unbypass-write <pattern>
+gatefs <name> unbypass-metadata <pattern>
+gatefs <name> list-protection [--read] [--write] [--metadata]
+gatefs <name> list-bypass [--read] [--write] [--metadata]
+gatefs <name> chmod ...
+gatefs <name> chown ...
+gatefs <name> chattr ...
+gatefs <name> allow [operation_id]
+gatefs <name> allow <operation_id> [--path <sandbox-glob>] [--duration[=<duration>]] [--tree]
+gatefs <name> allow --do-nothing <operation_id>
+gatefs <name> deny <operation_id>
+gatefs <name> cancel <operation_id>
+gatefs <name> cancel-all [mountpoint]
+gatefs <name> monitor [-f]
+gatefs <name> metadata
+gatefs-access-tui <name>
 ```
 
 `mount` without arguments lists mappings and hide rules for the sandbox. `allow` without arguments lists pending authorization requests.

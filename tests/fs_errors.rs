@@ -1,5 +1,5 @@
-use sandboxfs::path::SandboxPath;
-use sandboxfs::state::{MetadataOperation, Sandbox};
+use gatefs::path::SandboxPath;
+use gatefs::state::{MetadataOperation, Sandbox};
 use tempfile::TempDir;
 
 #[test]

@@ -6,19 +6,19 @@ Accepted.
 
 ## Context
 
-sandboxfs is a layered namespace filesystem. Mounts and hides are ordered overlay entries: a later mount can cover an earlier mount or hide, a later hide can cover earlier mounts, multiple mounts on the same sandbox path stack, and `umount` removes the newest matching mount so the previous layer is revealed. Later mounts below a hidden parent create read-only virtual ancestor directories so explicitly re-added paths remain reachable without leaking lower hidden directory contents.
+gatefs is a layered namespace filesystem. Mounts and hides are ordered overlay entries: a later mount can cover an earlier mount or hide, a later hide can cover earlier mounts, multiple mounts on the same sandbox path stack, and `umount` removes the newest matching mount so the previous layer is revealed. Later mounts below a hidden parent create read-only virtual ancestor directories so explicitly re-added paths remain reachable without leaking lower hidden directory contents.
 
 Read/write authorization, grants, trusted metadata scopes, and sandbox-local metadata overrides all operate in that layered namespace. If these features are not assigned clear identities, later remounts and hides can make state ambiguous. For example, a metadata override recorded only as `/x/file` can accidentally apply to a different backing layer after another mount shadows `/x`, while a read/write grant recorded only by path may or may not be intended to follow future remounts.
 
 ## Decision
 
-sandboxfs separates three concepts:
+gatefs separates three concepts:
 
 1. **Namespace overlay stack.** Mounts and hides are the filesystem shape. Resolution evaluates the ordered overlay stack and returns one of: real backing object, derived read-only virtual directory, hidden, or missing. This stack is the only source of path visibility.
 
 2. **Path-scoped policy overlays.** Read/write protection rules, read/write grants, and trusted metadata scopes are policy over the final sandbox namespace path. They are not tied to host paths, backing inode identity, or a specific mount layer. A rule or grant for `/root/**` continues to apply to later visible mounts under `/root` unless the policy is explicitly removed, denied, expired, or otherwise invalidated by its own policy lifetime. This preserves operator intent: policies name the sandbox-visible path scope, not the underlying host object that happened to back that path when the policy was created.
 
-3. **Resolved-layer metadata overlays.** Sandbox-local metadata overrides are tied to the resolved backing layer object at the time the metadata operation is authorized/applied. The override identity must include enough information to distinguish stacked mounts at the same sandbox path, such as the resolved mount layer id plus the relative path within that layer. Virtual directories may still have virtual metadata derived by sandboxfs, but file/directory metadata overrides for real backing objects must not be keyed only by sandbox namespace path.
+3. **Resolved-layer metadata overlays.** Sandbox-local metadata overrides are tied to the resolved backing layer object at the time the metadata operation is authorized/applied. The override identity must include enough information to distinguish stacked mounts at the same sandbox path, such as the resolved mount layer id plus the relative path within that layer. Virtual directories may still have virtual metadata derived by gatefs, but file/directory metadata overrides for real backing objects must not be keyed only by sandbox namespace path.
 
 This means metadata override behavior follows the namespace stack:
 

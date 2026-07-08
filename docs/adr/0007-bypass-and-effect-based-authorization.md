@@ -8,7 +8,7 @@ Accepted.
 
 ADR 0006 introduced per-layer passthrough rules as a narrow compatibility mechanism, primarily for AI-agent lock-directory workflows. That naming and behavior made the policy model harder to reason about: `passthrough-write` sounded like a partial host-filesystem write implementation, while the intended user-facing need is simpler.
 
-The policy question users need to answer is not "which internal write operations has sandboxfs implemented as passthrough?" It is:
+The policy question users need to answer is not "which internal write operations has gatefs implemented as passthrough?" It is:
 
 - which filesystem effects should require authorization;
 - which effects should be automatically allowed; and
@@ -18,18 +18,18 @@ FUSE exposes filesystem operations, not the originating shell command. A single 
 
 ## Decision
 
-sandboxfs renames `passthrough-*` to `bypass-*` and defines bypass rules as automatic-allow exclusions from protection rules.
+gatefs renames `passthrough-*` to `bypass-*` and defines bypass rules as automatic-allow exclusions from protection rules.
 
 The command surface is:
 
 ```text
-sandboxfs <name> bypass-read <glob>
-sandboxfs <name> bypass-write <glob>
-sandboxfs <name> bypass-metadata <glob>
-sandboxfs <name> unbypass-read <glob>
-sandboxfs <name> unbypass-write <glob>
-sandboxfs <name> unbypass-metadata <glob>
-sandboxfs <name> list-bypass [--read] [--write] [--metadata]
+gatefs <name> bypass-read <glob>
+gatefs <name> bypass-write <glob>
+gatefs <name> bypass-metadata <glob>
+gatefs <name> unbypass-read <glob>
+gatefs <name> unbypass-write <glob>
+gatefs <name> unbypass-metadata <glob>
+gatefs <name> list-bypass [--read] [--write] [--metadata]
 ```
 
 `bypass-*` rules are layer-specific. A matching `bypass-write` automatically allows the matching write effect; it does not bypass metadata effects. A matching `bypass-metadata` automatically allows the matching metadata effect; it does not bypass write effects.
@@ -72,4 +72,4 @@ If any affected effect is protected and not bypassed, the operation must pending
 
 The user-facing model becomes simpler: `protect-*` means "ask before this effect" and `bypass-*` means "automatically allow this effect." There is no separate "passthrough" vocabulary in commands, logs, IPC output, examples, or documentation.
 
-ADR 0006 remains historical context for the split between read/write and metadata policy layers and for glob pattern semantics, but this ADR supersedes ADR 0006's `passthrough-*` naming and its narrow `passthrough-write` behavior. Write authorization should no longer mean "allow the request and then still return EROFS" for write operations that sandboxfs exposes as protectable. If a protected write effect is allowed, sandboxfs should forward the corresponding filesystem operation to the backing filesystem unless another protected effect, such as metadata, blocks the operation. Backing filesystem or kernel support is authoritative for operations such as `mknod`: sandboxfs authorizes and forwards the effect, then returns the backing syscall errno if that filesystem, mount, process, or kernel policy rejects it.
+ADR 0006 remains historical context for the split between read/write and metadata policy layers and for glob pattern semantics, but this ADR supersedes ADR 0006's `passthrough-*` naming and its narrow `passthrough-write` behavior. Write authorization should no longer mean "allow the request and then still return EROFS" for write operations that gatefs exposes as protectable. If a protected write effect is allowed, gatefs should forward the corresponding filesystem operation to the backing filesystem unless another protected effect, such as metadata, blocks the operation. Backing filesystem or kernel support is authoritative for operations such as `mknod`: gatefs authorizes and forwards the effect, then returns the backing syscall errno if that filesystem, mount, process, or kernel policy rejects it.

@@ -5,11 +5,11 @@
 Show the operation log:
 
 ```sh
-sandboxfs demo monitor
-sandboxfs demo monitor -f
+gatefs demo monitor
+gatefs demo monitor -f
 ```
 
-`monitor` prints the recent log tail. `monitor -f` starts at the same tail and follows new log entries. Logs are reset when `sandboxfs run <name>` starts and are removed when the sandbox is destroyed.
+`monitor` prints the recent log tail. `monitor -f` starts at the same tail and follows new log entries. Logs are reset when `gatefs run <name>` starts and are removed when the sandbox is destroyed.
 
 Audit log entries use filesystem-operation vocabulary rather than shell command reconstruction. Every entry has a UTC microsecond timestamp and its own event ID, for example:
 
@@ -23,19 +23,19 @@ The log writer is a serialized event loop. FUSE and control paths publish events
 
 ## Runtime paths
 
-- `SANDBOXFS_RUNTIME_DIR` overrides the runtime directory.
-- Without an override, `sandboxfs` asks `directories-rs` (`directories::ProjectDirs`) for the project runtime directory.
+- `GATEFS_RUNTIME_DIR` overrides the runtime directory.
+- Without an override, `gatefs` asks `directories-rs` (`directories::ProjectDirs`) for the project runtime directory.
 - If the platform has no project runtime directory, it falls back to the project cache directory with a `run` child.
 - Runtime directories are created with mode `0700`.
 - Socket path defaults to `<runtime>/<name>.sock`.
-- `SANDBOXFS_SOCKET` overrides the socket path for special cases and tests.
+- `GATEFS_SOCKET` overrides the socket path for special cases and tests.
 - Log path defaults to `<runtime>/<name>.log`.
-- `SANDBOXFS_LOG_DIR` overrides the log directory.
+- `GATEFS_LOG_DIR` overrides the log directory.
 - Temporary trusted-operation mountpoints live under `<runtime>/tmp/`.
 
 ## Current limitations
 
-- `sandboxfs` is not a complete process sandbox or security boundary by itself; use it with an existing sandboxing or runtime isolation tool when process isolation is required.
+- `gatefs` is not a complete process sandbox or security boundary by itself; use it with an existing sandboxing or runtime isolation tool when process isolation is required.
 - Protection and bypass are evaluated per filesystem effect. A matching `bypass-write` automatically allows write effects but does not bypass `protect-metadata` for metadata side effects. Write operations, including `mknod`, are forwarded to the backing filesystem after policy allows them; backing filesystem, mount, process, or kernel restrictions may still return their native errno.
 - Real FUSE behavior depends on `/dev/fuse` and `fusermount3` availability and permissions.
 - The project is experimental.

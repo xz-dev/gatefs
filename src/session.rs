@@ -262,8 +262,8 @@ impl SessionState {
         );
         let mut config = Config::default();
         config.mount_options = vec![
-            MountOption::FSName(format!("sandboxfs:{name}")),
-            MountOption::Subtype("sandboxfs".to_string()),
+            MountOption::FSName(format!("gatefs:{name}")),
+            MountOption::Subtype("gatefs".to_string()),
             MountOption::RW,
         ];
         let session = fuser::spawn_mount2(fs, &mountpoint, &config)?;
@@ -1292,10 +1292,10 @@ pub fn serve_session(runtime: RuntimePaths, name: String) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     install_signal_handlers(Arc::clone(&stop))?;
 
-    println!("sandboxfs {name} running");
+    println!("gatefs {name} running");
     println!("socket: {}", socket.display());
     println!("log:    {}", runtime.sandbox_log_path(&name).display());
-    println!("press Ctrl-C or run `sandboxfs {name} destroy` to stop");
+    println!("press Ctrl-C or run `gatefs {name} destroy` to stop");
 
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {

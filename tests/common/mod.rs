@@ -31,13 +31,13 @@ impl RunningSession {
     fn start_in_temp(name: &str, temp: TempDir) -> Self {
         let runtime = temp.path().join("run");
         let log_dir = temp.path().join("logs");
-        let child = Command::cargo_bin("sandboxfs")
+        let child = Command::cargo_bin("gatefs")
             .unwrap()
             .arg("run")
             .arg(name)
-            .env("SANDBOXFS_RUNTIME_DIR", &runtime)
-            .env("SANDBOXFS_LOG_DIR", &log_dir)
-            .env_remove("SANDBOXFS_SOCKET")
+            .env("GATEFS_RUNTIME_DIR", &runtime)
+            .env("GATEFS_LOG_DIR", &log_dir)
+            .env_remove("GATEFS_SOCKET")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -64,7 +64,7 @@ impl RunningSession {
     }
 
     pub fn sandbox_cmd(&self) -> Command {
-        let mut cmd = sandboxfs_cmd_for(&self.runtime(), &self.log_dir());
+        let mut cmd = gatefs_cmd_for(&self.runtime(), &self.log_dir());
         cmd.arg(&self.name);
         cmd
     }
@@ -123,11 +123,11 @@ impl Drop for RunningSession {
     }
 }
 
-pub fn sandboxfs_cmd_for(runtime: &Path, log_dir: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("sandboxfs").unwrap();
-    cmd.env("SANDBOXFS_RUNTIME_DIR", runtime)
-        .env("SANDBOXFS_LOG_DIR", log_dir)
-        .env_remove("SANDBOXFS_SOCKET");
+pub fn gatefs_cmd_for(runtime: &Path, log_dir: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("gatefs").unwrap();
+    cmd.env("GATEFS_RUNTIME_DIR", runtime)
+        .env("GATEFS_LOG_DIR", log_dir)
+        .env_remove("GATEFS_SOCKET");
     cmd
 }
 

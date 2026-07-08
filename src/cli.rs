@@ -22,7 +22,7 @@ use crate::{Error, Result};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "sandboxfs",
+    name = "gatefs",
     version,
     about = "Foreground, in-memory overlay sandbox filesystem"
 )]
@@ -170,7 +170,7 @@ fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         TopCommand::Sandbox(args) => {
-            let mut argv = vec![OsString::from("sandboxfs")];
+            let mut argv = vec![OsString::from("gatefs")];
             argv.extend(args);
             let sandbox =
                 SandboxCli::try_parse_from(argv).map_err(|err| Error::msg(err.to_string()))?;
@@ -547,7 +547,7 @@ fn unbypass(
 fn send(runtime: &RuntimePaths, name: &str, request: &Request) -> Result<Response> {
     ipc::send(&runtime.socket_path(name), request).map_err(|error| {
         Error::msg(format!(
-            "could not contact sandbox session {name}; is `sandboxfs run {name}` running? ({error})"
+            "could not contact sandbox session {name}; is `gatefs run {name}` running? ({error})"
         ))
     })
 }
@@ -858,7 +858,7 @@ fn rewrite_chmod_args(args: &[String]) -> Result<RewrittenCommand> {
         }
         if item.starts_with("--reference") {
             return Err(Error::msg(
-                "chmod --reference is not supported by sandboxfs path rewriting",
+                "chmod --reference is not supported by gatefs path rewriting",
             ));
         }
         if item.starts_with('-') && !mode_seen {
@@ -887,7 +887,7 @@ fn rewrite_chown_args(args: &[String]) -> Result<RewrittenCommand> {
         }
         if item.starts_with("--reference") || item.starts_with("--from") {
             return Err(Error::msg(
-                "chown --reference/--from is not supported by sandboxfs path rewriting",
+                "chown --reference/--from is not supported by gatefs path rewriting",
             ));
         }
         if item.starts_with('-') && !owner_seen {
@@ -960,7 +960,7 @@ fn reject_parent_dir_operand(item: &str) -> Result<()> {
         .any(|component| matches!(component, Component::ParentDir))
     {
         return Err(Error::msg(
-            "metadata command paths containing '..' are not supported by sandboxfs path rewriting",
+            "metadata command paths containing '..' are not supported by gatefs path rewriting",
         ));
     }
     Ok(())

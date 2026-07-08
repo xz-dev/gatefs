@@ -1,5 +1,5 @@
 [package]
-name = "sandboxfs"
+name = "gatefs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
@@ -26,14 +26,14 @@ predicates = "3.1"
 tempfile = "3.27"
 
 [lib]
-name = "sandboxfs"
+name = "gatefs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sandboxfs"
-path = "src/bin/sandboxfs.rs"
+name = "gatefs"
+path = "src/bin/gatefs.rs"
 
 
 [[bin]]
-name = "sandboxfs-access-tui"
-path = "src/bin/sandboxfs-access-tui.rs"
+name = "gatefs-access-tui"
+path = "src/bin/gatefs-access-tui.rs"

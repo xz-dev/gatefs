@@ -8,38 +8,38 @@ ADR 0004 and ADR 0007 supersede this ADR's historical xattr/default-metadata ass
 
 ## Context
 
-sandboxfs has separate policy layers:
+gatefs has separate policy layers:
 
 1. The namespace overlay stack (`mount`, `hide`, `umount`) decides which sandbox paths are visible and what backing object, if any, they resolve to.
 2. Read/write operation policy controls file-content and directory-structure operations such as reading files, reading directories, opening for write, creating files, creating directories, removing directories, and renaming paths.
 3. Metadata policy controls metadata operations such as chmod, chown, chattr, timestamp updates, and xattr updates.
 4. Sandbox-local metadata overlays can present changed metadata without mutating the backing filesystem.
 
-The existing implementation protected direct metadata mutations by default: a direct chmod/chown/chattr/timestamp/xattr operation through a FUSE attach became a pending request unless it came from a trusted sandboxfs CLI metadata helper. That default conflated "metadata is a managed surface" with "metadata is protected by default." It also made it hard to express a narrow operational need such as allowing Pi's lock-directory timestamps while keeping broader home-directory state hidden.
+The existing implementation protected direct metadata mutations by default: a direct chmod/chown/chattr/timestamp/xattr operation through a FUSE attach became a pending request unless it came from a trusted gatefs CLI metadata helper. That default conflated "metadata is a managed surface" with "metadata is protected by default." It also made it hard to express a narrow operational need such as allowing Pi's lock-directory timestamps while keeping broader home-directory state hidden.
 
-The `example/pi-sandbox.sh` wrapper exposes a concrete case. Pi's settings and trust loaders use `proper-lockfile`, which creates lock directories such as `$HOME/.pi/agent/settings.json.lock` and `$HOME/.pi/agent/trust.json.lock`, updates their timestamps, stats them, and removes them. With `$HOME` hidden and only selected descendants re-exposed through sandboxfs, directory creation/removal belongs to the read/write operation layer while timestamp updates belong to the metadata layer. One command that bypasses both layers would blur policy boundaries.
+The `example/pi-gatefs.sh` wrapper exposes a concrete case. Pi's settings and trust loaders use `proper-lockfile`, which creates lock directories such as `$HOME/.pi/agent/settings.json.lock` and `$HOME/.pi/agent/trust.json.lock`, updates their timestamps, stats them, and removes them. With `$HOME` hidden and only selected descendants re-exposed through gatefs, directory creation/removal belongs to the read/write operation layer while timestamp updates belong to the metadata layer. One command that bypasses both layers would blur policy boundaries.
 
 Path patterns for these policies are also becoming more expressive. `protect-*`, `unprotect-*`, and the new `passthrough-*` commands all need consistent glob semantics, including preserving a trailing slash as a directory-only pattern. The previous hand-written matcher only supported a small subset and normalized paths through `SandboxPath`, which loses trailing slash intent.
 
 ## Decision
 
-sandboxfs keeps passthrough and protection rules strictly split by policy layer.
+gatefs keeps passthrough and protection rules strictly split by policy layer.
 
 ### Read/write operation policy
 
 The read/write layer uses these commands:
 
 ```text
-sandboxfs <name> protect-read <glob>
-sandboxfs <name> protect-write <glob>
-sandboxfs <name> unprotect-read <glob>
-sandboxfs <name> unprotect-write <glob>
-sandboxfs <name> passthrough-read <glob>
-sandboxfs <name> passthrough-write <glob>
-sandboxfs <name> unpassthrough-read <glob>
-sandboxfs <name> unpassthrough-write <glob>
-sandboxfs <name> list-protection [--read] [--write] [--metadata]
-sandboxfs <name> list-passthrough [--read] [--write] [--metadata]
+gatefs <name> protect-read <glob>
+gatefs <name> protect-write <glob>
+gatefs <name> unprotect-read <glob>
+gatefs <name> unprotect-write <glob>
+gatefs <name> passthrough-read <glob>
+gatefs <name> passthrough-write <glob>
+gatefs <name> unpassthrough-read <glob>
+gatefs <name> unpassthrough-write <glob>
+gatefs <name> list-protection [--read] [--write] [--metadata]
+gatefs <name> list-passthrough [--read] [--write] [--metadata]
 ```
 
 `passthrough-read` and `passthrough-write` apply only to read/write filesystem operation intent. They must not bypass metadata management. In the initial implementation, `passthrough-write` is intentionally narrow and covers only lock-directory creation and removal through `mkdir` and `rmdir` on matching visible directories. Other write-class operations such as create, mknod, symlink, link, unlink, rename, open-for-write, write, and truncate remain read-only or unsupported until a later explicit slice implements them. `passthrough-write` does not cover chmod/chown/chattr/timestamp/xattr behavior.
@@ -49,10 +49,10 @@ sandboxfs <name> list-passthrough [--read] [--write] [--metadata]
 The metadata layer uses explicit commands:
 
 ```text
-sandboxfs <name> protect-metadata <glob>
-sandboxfs <name> unprotect-metadata <glob>
-sandboxfs <name> passthrough-metadata <glob>
-sandboxfs <name> unpassthrough-metadata <glob>
+gatefs <name> protect-metadata <glob>
+gatefs <name> unprotect-metadata <glob>
+gatefs <name> passthrough-metadata <glob>
+gatefs <name> unpassthrough-metadata <glob>
 ```
 
 Metadata is no longer protected by default. Direct metadata operations that do not match `protect-metadata` and do not match `passthrough-metadata` use the existing sandbox-local metadata behavior where applicable, without creating a pending request. Only `protect-metadata` creates pending metadata authorization. Only `passthrough-metadata` forwards metadata mutation to the backing filesystem.
@@ -76,7 +76,7 @@ Policy matching never grants visibility by itself. A passthrough or protection r
 
 ### Pi sandbox lock directories
 
-`example/pi-sandbox.sh` should keep `$HOME` hidden and re-expose only the needed user config/workspace paths. For Pi's lock directories it should use separate rules:
+`example/pi-gatefs.sh` should keep `$HOME` hidden and re-expose only the needed user config/workspace paths. For Pi's lock directories it should use separate rules:
 
 ```sh
 sf passthrough-write "$HOST_HOME/.pi/agent/settings.json.lock"
@@ -85,7 +85,7 @@ sf passthrough-write "$HOST_HOME/.pi/agent/trust.json.lock"
 sf passthrough-metadata "$HOST_HOME/.pi/agent/trust.json.lock"
 ```
 
-The write rules cover lock-directory creation/removal. The metadata rules cover timestamp updates. The wrapper must not bind the entire `.pi` or `.agents` trees over the sandboxfs view as a shortcut, because that would bypass sandboxfs visibility and logging for too broad a scope.
+The write rules cover lock-directory creation/removal. The metadata rules cover timestamp updates. The wrapper must not bind the entire `.pi` or `.agents` trees over the gatefs view as a shortcut, because that would bypass gatefs visibility and logging for too broad a scope.
 
 ## Consequences
 

@@ -255,7 +255,7 @@ fn format_attach_suffix(attach_id: Option<u64>) -> String {
 }
 
 pub fn edit_pending_command(name: &str, id: u64, current_command: &str) -> Result<String> {
-    let edited = std::env::var("SANDBOXFS_EDIT_COMMAND")
+    let edited = std::env::var("GATEFS_EDIT_COMMAND")
         .ok()
         .or_else(|| edit_with_external_editor(current_command).ok())
         .ok_or_else(|| Error::msg("no edit command was provided"))?;
@@ -266,7 +266,7 @@ pub fn edit_pending_command_with_options(
     name: &str,
     id: u64,
     edited: &str,
-    sandboxfs_bin: Option<OsString>,
+    gatefs_bin: Option<OsString>,
     runtime: Option<&RuntimePaths>,
 ) -> Result<String> {
     let mut argv =
@@ -284,7 +284,7 @@ pub fn edit_pending_command_with_options(
         }
     }
 
-    let mut command_status = sandboxfs_command(sandboxfs_bin.clone());
+    let mut command_status = gatefs_command(gatefs_bin.clone());
     apply_runtime_env(&mut command_status, runtime);
     let status = command_status
         .arg(name)
@@ -294,7 +294,7 @@ pub fn edit_pending_command_with_options(
     if !status.success() {
         return Ok(format!("edited command failed with {status}"));
     }
-    let mut release_command = sandboxfs_command(sandboxfs_bin);
+    let mut release_command = gatefs_command(gatefs_bin);
     apply_runtime_env(&mut release_command, runtime);
     let status = release_command
         .arg(name)
@@ -309,19 +309,19 @@ pub fn edit_pending_command_with_options(
     }
 }
 
-fn sandboxfs_command(explicit_bin: Option<OsString>) -> Command {
-    if let Some(bin) = explicit_bin.or_else(|| std::env::var_os("SANDBOXFS_BIN")) {
+fn gatefs_command(explicit_bin: Option<OsString>) -> Command {
+    if let Some(bin) = explicit_bin.or_else(|| std::env::var_os("GATEFS_BIN")) {
         return Command::new(bin);
     }
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(dir) = current_exe.parent()
     {
-        let sibling = dir.join("sandboxfs");
+        let sibling = dir.join("gatefs");
         if sibling.exists() {
             return Command::new(sibling);
         }
     }
-    Command::new("sandboxfs")
+    Command::new("gatefs")
 }
 
 fn apply_runtime_env(command: &mut Command, runtime: Option<&RuntimePaths>) {
@@ -336,7 +336,7 @@ fn apply_runtime_env(command: &mut Command, runtime: Option<&RuntimePaths>) {
 fn edit_with_external_editor(current_command: &str) -> Result<String> {
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
-        .map_err(|_| Error::msg("set SANDBOXFS_EDIT_COMMAND or EDITOR to edit commands"))?;
+        .map_err(|_| Error::msg("set GATEFS_EDIT_COMMAND or EDITOR to edit commands"))?;
     let path = RuntimePaths::discover()?
         .runtime_dir
         .join("tmp")
@@ -367,7 +367,7 @@ fn monotonic_id() -> u64 {
 fn send(runtime: &RuntimePaths, name: &str, request: &Request) -> Result<Response> {
     ipc::send(&runtime.socket_path(name), request).map_err(|error| {
         Error::msg(format!(
-            "could not contact sandbox session {name}; is `sandboxfs run {name}` running? ({error})"
+            "could not contact sandbox session {name}; is `gatefs run {name}` running? ({error})"
         ))
     })
 }

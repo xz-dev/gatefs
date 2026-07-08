@@ -8,12 +8,12 @@ use directories::ProjectDirs;
 
 use crate::{Error, Result};
 
-pub const ENV_RUNTIME_DIR: &str = "SANDBOXFS_RUNTIME_DIR";
-pub const ENV_SOCKET: &str = "SANDBOXFS_SOCKET";
-pub const ENV_LOG_DIR: &str = "SANDBOXFS_LOG_DIR";
+pub const ENV_RUNTIME_DIR: &str = "GATEFS_RUNTIME_DIR";
+pub const ENV_SOCKET: &str = "GATEFS_SOCKET";
+pub const ENV_LOG_DIR: &str = "GATEFS_LOG_DIR";
 const QUALIFIER: &str = "net";
 const ORGANIZATION: &str = "xz-dev";
-const APPLICATION: &str = "sandboxfs";
+const APPLICATION: &str = "gatefs";
 
 #[derive(Debug, Clone)]
 pub struct RuntimePaths {
@@ -85,7 +85,7 @@ pub fn runtime_dir() -> Result<PathBuf> {
 
 fn project_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
-        .ok_or_else(|| Error::msg("could not determine standard project directories for sandboxfs"))
+        .ok_or_else(|| Error::msg("could not determine standard project directories for gatefs"))
 }
 
 fn runtime_dir_from_project_dirs(dirs: &ProjectDirs) -> PathBuf {

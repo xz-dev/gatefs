@@ -1,6 +1,6 @@
-# sandboxfs documentation
+# gatefs documentation
 
-`sandboxfs` is an observable filesystem protection shim. It is meant to be initialized explicitly by the caller for each use case, usually from a small script that combines an existing sandboxing tool with `sandboxfs` policy commands.
+`gatefs` is an observable filesystem protection shim. It is meant to be initialized explicitly by the caller for each use case, usually from a small script that combines an existing sandboxing tool with `gatefs` policy commands.
 
 ## User guide
 
