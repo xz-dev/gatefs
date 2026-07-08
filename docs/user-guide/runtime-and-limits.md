@@ -36,6 +36,6 @@ The log writer is a serialized event loop. FUSE and control paths publish events
 ## Current limitations
 
 - `sandboxfs` is not a complete process sandbox or security boundary by itself; use it with an existing sandboxing or runtime isolation tool when process isolation is required.
-- Protection and bypass are evaluated per filesystem effect. A matching `bypass-write` automatically allows write effects but does not bypass `protect-metadata` for metadata side effects.
+- Protection and bypass are evaluated per filesystem effect. A matching `bypass-write` automatically allows write effects but does not bypass `protect-metadata` for metadata side effects. Write operations, including `mknod`, are forwarded to the backing filesystem after policy allows them; backing filesystem, mount, process, or kernel restrictions may still return their native errno.
 - Real FUSE behavior depends on `/dev/fuse` and `fusermount3` availability and permissions.
 - The project is experimental.

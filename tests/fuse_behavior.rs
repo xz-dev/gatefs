@@ -3,7 +3,7 @@ mod common;
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime};
@@ -1028,6 +1028,69 @@ fn bypass_write_allows_matching_write_effects_without_pending() {
         .assert()
         .success()
         .stdout(predicates::str::is_empty());
+}
+
+#[test]
+#[ignore]
+fn protected_mknod_fifo_allow_forwards_to_backing_filesystem() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    require_command("mkfifo");
+    let session = RunningSession::start("demo_fuse_mknod_fifo");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-write", "/data/fifo"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let mut child = std::process::Command::new("mkfifo")
+        .arg(mountpoint.join("data/fifo"))
+        .spawn()
+        .unwrap();
+    assert!(wait_until(Duration::from_secs(3), || {
+        session
+            .sandbox_cmd()
+            .arg("allow")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("WRITE mknod"))
+            .unwrap_or(false)
+    }));
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    let id = pending.split_whitespace().next().unwrap().to_string();
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    assert!(wait_child(&mut child).success());
+    assert!(
+        fs::symlink_metadata(local.join("fifo"))
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    assert_log_line_contains(
+        &session_log(&session),
+        &[" pending ", "path=/data/fifo WRITE mknod"],
+    );
 }
 
 #[test]

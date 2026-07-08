@@ -114,6 +114,15 @@ pub fn mkdir(path: &Path, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+pub fn mknod(path: &Path, mode: u32, rdev: u32) -> std::io::Result<()> {
+    let path = cstring(path.as_os_str())?;
+    let result = unsafe { libc::mknod(path.as_ptr(), mode, rdev as libc::dev_t) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub fn symlink(target: &Path, link_path: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link_path)
 }

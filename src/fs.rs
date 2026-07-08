@@ -1464,19 +1464,50 @@ impl Filesystem for SandboxFs {
 
     fn mknod(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
-        _rdev: u32,
+        rdev: u32,
         reply: ReplyEntry,
     ) {
-        if self.path_child(parent, name).is_err() {
+        let Ok(path) = self.path_child(parent, name) else {
             reply.error(Errno::ENOENT);
             return;
+        };
+        match self.authorize_read_write(
+            RequestIdentity::from_request(req),
+            ReadWriteOperation::Mknod { path: path.clone() },
+        ) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
         }
-        reply.error(Errno::EROFS);
+        let local_path = match self.local_path_for_child(parent, name) {
+            Ok(local_path) => local_path,
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        };
+        match hostfs::mknod(&local_path, mode, rdev).and_then(|()| real_attr(&path, &local_path)) {
+            Ok(mut attr) => {
+                attr.ino = self.remember(&path);
+                reply.entry(&TTL, &attr, Generation(0));
+            }
+            Err(err) => reply.error(io_to_errno(err)),
+        }
     }
 
     fn symlink(
