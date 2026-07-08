@@ -6,14 +6,15 @@ set -euo pipefail
 # sandboxfs is used here to make the agent's filesystem view and operations
 # observable, not to provide a strong isolation boundary. The view starts from
 # host /, hides /home and $HOME, then re-exposes $HOME/.pi, $HOME/.agents,
-# and the current working directory. The wrapped process inherits the caller's
-# environment; this script only replaces PATH with a small system PATH so hidden
-# home PATH entries are not accidentally re-exposed.
+# the caller's PATH directories, and the current working directory. The wrapped
+# process inherits the caller's environment; this script only sets PATH.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 HOST_CWD=$(pwd -P)
 HOST_HOME=${HOME:?HOME must be set}
-SANDBOXED_PATH=${PI_SANDBOX_PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}
+HOST_TMPDIR=${TMPDIR:-/tmp}
+HOST_PATH=${PATH:-}
+SANDBOXED_PATH=${PI_SANDBOX_PATH:-$HOST_PATH}
 
 require_executable() {
     local name=$1
@@ -41,12 +42,12 @@ resolve_sandboxfs() {
 resolve_pi() {
     if [[ -n ${PI_BIN:-} ]]; then
         printf '%s\n' "$PI_BIN"
+    elif command -v pi >/dev/null 2>&1; then
+        command -v pi
     elif [[ -e /bin/pi ]]; then
         printf '/bin/pi\n'
     elif [[ -e /usr/bin/pi ]]; then
         printf '/usr/bin/pi\n'
-    elif command -v pi >/dev/null 2>&1; then
-        command -v pi
     else
         printf 'pi-sandbox: pi not found. Set PI_BIN or install pi.\n' >&2
         exit 127
@@ -123,7 +124,18 @@ sf hide /home
 sf hide "$HOST_HOME"
 sf mount "$HOST_HOME/.pi" "$HOST_HOME/.pi"
 sf mount "$HOST_HOME/.agents" "$HOST_HOME/.agents"
+IFS=: read -r -a HOST_PATH_DIRS <<< "$HOST_PATH"
+for path_dir in "${HOST_PATH_DIRS[@]}"; do
+    [[ -n $path_dir && -d $path_dir && $path_dir = /* ]] || continue
+    while [[ $path_dir != / && $path_dir == */ ]]; do
+        path_dir=${path_dir%/}
+    done
+    sf mount "$path_dir" "$path_dir"
+    sf protect-write "$path_dir/"
+    sf protect-write "$path_dir/**"
+done
 sf mount "$HOST_CWD" "$HOST_CWD"
+sf passthrough-write "$HOST_TMPDIR/pi.*/"
 sf passthrough-write "$HOST_HOME/.pi/agent/settings.json.lock"
 sf passthrough-metadata "$HOST_HOME/.pi/agent/settings.json.lock"
 sf passthrough-write "$HOST_HOME/.pi/agent/trust.json.lock"
