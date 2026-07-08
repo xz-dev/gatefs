@@ -302,6 +302,41 @@ fn attach_xattr_bypass() {
 
 #[test]
 #[ignore]
+fn unprotected_xattr_write_forwards_to_backing_filesystem() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_unprotected_forward");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    set_xattr(&mountpoint.join("data/file"), "user.unprotected", b"value").unwrap();
+    assert_eq!(
+        get_xattr(&local.join("file"), "user.unprotected").unwrap(),
+        b"value"
+    );
+    remove_xattr(&mountpoint.join("data/file"), "user.unprotected").unwrap();
+    let err = get_xattr(&local.join("file"), "user.unprotected").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENODATA));
+}
+
+#[test]
+#[ignore]
 fn attach_xattr_bypass_does_not_follow_symlink_inode() {
     require_fuse();
     if !fuse_enabled() {
@@ -383,7 +418,10 @@ fn protected_xattr_write_is_metadata_gated() {
         .assert()
         .success();
     child.join().unwrap().unwrap();
-    assert!(get_xattr(&local.join("file"), "user.gated").is_err());
+    assert_eq!(
+        get_xattr(&local.join("file"), "user.gated").unwrap(),
+        b"value"
+    );
 
     let log = session_log(&session);
     assert_log_line_contains(

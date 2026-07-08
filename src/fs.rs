@@ -614,21 +614,6 @@ impl SandboxFs {
             PendingDecision::Cancel => reply.error(Errno::ECANCELED),
         });
     }
-
-    fn spawn_metadata_empty_waiter(&self, pending: PendingMetadataOutcome, reply: ReplyEmpty) {
-        let fs = self.clone();
-        std::thread::spawn(move || match wait_for_decision(&pending.waiter) {
-            PendingDecision::Apply => {
-                match fs.apply_pending_operation(&pending.operation, &pending.object) {
-                    Ok(()) => reply.ok(),
-                    Err(err) => reply.error(err),
-                }
-            }
-            PendingDecision::DoNothing => reply.ok(),
-            PendingDecision::Deny => reply.error(Errno::EPERM),
-            PendingDecision::Cancel => reply.error(Errno::ECANCELED),
-        });
-    }
 }
 
 fn flags_to_xflags(flags: u32) -> u32 {
@@ -1218,9 +1203,27 @@ impl Filesystem for SandboxFs {
             return;
         }
         match self.begin_metadata_request(RequestIdentity::from_request(req), path, operation) {
-            Ok(MetadataOutcome::Applied(_)) => reply.ok(),
+            Ok(MetadataOutcome::Applied(_)) => {
+                match hostfs::setxattr(&local_path, name, value, flags) {
+                    Ok(()) => reply.ok(),
+                    Err(err) => reply.error(io_to_errno(err)),
+                }
+            }
             Ok(MetadataOutcome::Pending(pending)) => {
-                self.spawn_metadata_empty_waiter(pending, reply)
+                let local_path = local_path.clone();
+                let name = name.to_os_string();
+                let value = value.to_vec();
+                std::thread::spawn(move || match wait_for_decision(&pending.waiter) {
+                    PendingDecision::Apply => {
+                        match hostfs::setxattr(&local_path, &name, &value, flags) {
+                            Ok(()) => reply.ok(),
+                            Err(err) => reply.error(io_to_errno(err)),
+                        }
+                    }
+                    PendingDecision::DoNothing => reply.ok(),
+                    PendingDecision::Deny => reply.error(Errno::EPERM),
+                    PendingDecision::Cancel => reply.error(Errno::ECANCELED),
+                });
             }
             Err(err) => reply.error(err),
         }
@@ -1276,9 +1279,22 @@ impl Filesystem for SandboxFs {
             return;
         }
         match self.begin_metadata_request(RequestIdentity::from_request(req), path, operation) {
-            Ok(MetadataOutcome::Applied(_)) => reply.ok(),
+            Ok(MetadataOutcome::Applied(_)) => match hostfs::removexattr(&local_path, name) {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(io_to_errno(err)),
+            },
             Ok(MetadataOutcome::Pending(pending)) => {
-                self.spawn_metadata_empty_waiter(pending, reply)
+                let local_path = local_path.clone();
+                let name = name.to_os_string();
+                std::thread::spawn(move || match wait_for_decision(&pending.waiter) {
+                    PendingDecision::Apply => match hostfs::removexattr(&local_path, &name) {
+                        Ok(()) => reply.ok(),
+                        Err(err) => reply.error(io_to_errno(err)),
+                    },
+                    PendingDecision::DoNothing => reply.ok(),
+                    PendingDecision::Deny => reply.error(Errno::EPERM),
+                    PendingDecision::Cancel => reply.error(Errno::ECANCELED),
+                });
             }
             Err(err) => reply.error(err),
         }
