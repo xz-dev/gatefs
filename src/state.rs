@@ -84,6 +84,9 @@ impl PolicyPattern {
         if self.directory_only && !target_is_dir {
             return false;
         }
+        if self.directory_only && self.raw != "/" && path.as_path() == Path::new("/") {
+            return false;
+        }
         let Ok(pattern) = glob::Pattern::new(&glob_pattern_for_match(&self.raw)) else {
             return false;
         };
@@ -1982,6 +1985,47 @@ mod tests {
         assert!(!s.is_protected(
             ProtectionKind::Read,
             &SandboxPath::new("/glob/a.md").unwrap(),
+            false
+        ));
+    }
+
+    #[test]
+    fn trailing_slash_globs_match_only_directories_at_their_depth() {
+        let mut s = Sandbox::new("s", TempDir::new().unwrap().path().join("s.log"));
+        s.protect(ProtectionKind::Read, PolicyPattern::new("/*/").unwrap());
+        s.protect(ProtectionKind::Write, PolicyPattern::new("/**/").unwrap());
+
+        assert!(!s.is_protected(ProtectionKind::Read, &SandboxPath::new("/").unwrap(), true));
+        assert!(s.is_protected(
+            ProtectionKind::Read,
+            &SandboxPath::new("/bin").unwrap(),
+            true
+        ));
+        assert!(!s.is_protected(
+            ProtectionKind::Read,
+            &SandboxPath::new("/bin").unwrap(),
+            false
+        ));
+        assert!(!s.is_protected(
+            ProtectionKind::Read,
+            &SandboxPath::new("/usr/bin").unwrap(),
+            true
+        ));
+
+        assert!(!s.is_protected(ProtectionKind::Write, &SandboxPath::new("/").unwrap(), true));
+        assert!(s.is_protected(
+            ProtectionKind::Write,
+            &SandboxPath::new("/usr").unwrap(),
+            true
+        ));
+        assert!(s.is_protected(
+            ProtectionKind::Write,
+            &SandboxPath::new("/usr/bin").unwrap(),
+            true
+        ));
+        assert!(!s.is_protected(
+            ProtectionKind::Write,
+            &SandboxPath::new("/usr/bin/tool").unwrap(),
             false
         ));
     }
