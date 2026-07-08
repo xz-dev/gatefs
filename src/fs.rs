@@ -1857,23 +1857,7 @@ fn system_time(sec: i64, nsec: i64) -> SystemTime {
 }
 
 fn io_to_errno(err: std::io::Error) -> Errno {
-    match err.raw_os_error().unwrap_or(libc::EIO) {
-        libc::EPERM => Errno::EPERM,
-        libc::ENOENT => Errno::ENOENT,
-        libc::EIO => Errno::EIO,
-        libc::EBADF => Errno::EBADF,
-        libc::EACCES => Errno::EACCES,
-        libc::EEXIST => Errno::EEXIST,
-        libc::ENOTDIR => Errno::ENOTDIR,
-        libc::EISDIR => Errno::EISDIR,
-        libc::EINVAL => Errno::EINVAL,
-        libc::ERANGE => Errno::ERANGE,
-        libc::EROFS => Errno::EROFS,
-        libc::ENODATA => Errno::ENODATA,
-        libc::ENOSYS => Errno::ENOSYS,
-        libc::ENOTSUP => Errno::ENOTSUP,
-        _ => Errno::EIO,
-    }
+    Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))
 }
 
 trait OsStrBytes {
@@ -1996,6 +1980,22 @@ mod tests {
         let (lock, cvar) = &*waiter;
         *lock.lock().unwrap() = Some(decision);
         cvar.notify_all();
+    }
+
+    #[test]
+    fn io_to_errno_preserves_raw_host_errno_values() {
+        assert_eq!(
+            i32::from(io_to_errno(std::io::Error::from_raw_os_error(libc::EDQUOT))),
+            libc::EDQUOT
+        );
+        assert_eq!(
+            i32::from(io_to_errno(std::io::Error::from_raw_os_error(libc::ENOSPC))),
+            libc::ENOSPC
+        );
+        assert_eq!(
+            i32::from(io_to_errno(std::io::Error::from(std::io::ErrorKind::Other))),
+            libc::EIO
+        );
     }
 
     #[test]

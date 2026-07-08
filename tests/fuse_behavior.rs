@@ -433,6 +433,78 @@ fn protected_xattr_write_is_metadata_gated() {
 
 #[test]
 #[ignore]
+fn protected_removexattr_write_is_metadata_gated() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_removexattr_metadata_gate");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    set_xattr(&local.join("file"), "user.gated_remove", b"value").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-metadata", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let child = std::thread::spawn({
+        let path = mountpoint.join("data/file");
+        move || remove_xattr(&path, "user.gated_remove")
+    });
+    assert!(wait_until(Duration::from_secs(3), || {
+        session
+            .sandbox_cmd()
+            .arg("allow")
+            .output()
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout).contains("REMOVEXATTR name=user.gated_remove")
+            })
+            .unwrap_or(false)
+    }));
+    assert_eq!(
+        get_xattr(&local.join("file"), "user.gated_remove").unwrap(),
+        b"value"
+    );
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    let id = pending.split_whitespace().next().unwrap().to_string();
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    child.join().unwrap().unwrap();
+    let err = get_xattr(&local.join("file"), "user.gated_remove").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::ENODATA));
+
+    let log = session_log(&session);
+    assert_log_line_contains(
+        &log,
+        &[
+            " pending ",
+            "path=/data/file REMOVEXATTR name=user.gated_remove",
+        ],
+    );
+    assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
+}
+
+#[test]
+#[ignore]
 fn attach_readlink_bypass() {
     require_fuse();
     if !fuse_enabled() {
