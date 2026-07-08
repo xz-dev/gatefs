@@ -538,12 +538,12 @@ fn fsync_read_handle_succeeds() {
 
 #[test]
 #[ignore]
-fn attach_read_and_read_only_write_error() {
+fn attach_read_and_unprotected_write_succeeds() {
     require_fuse();
     if !fuse_enabled() {
         return;
     }
-    let session = RunningSession::start("demo_fuse_read");
+    let session = RunningSession::start("demo_fuse_read_write_default");
     let local = session.temp.path().join("local");
     let mountpoint = session.temp.path().join("mnt");
     fs::create_dir_all(&local).unwrap();
@@ -565,12 +565,8 @@ fn attach_read_and_read_only_write_error() {
         fs::read_to_string(mountpoint.join("data/file")).unwrap(),
         "hello"
     );
-    let err = fs::write(mountpoint.join("data/file"), "new").unwrap_err();
-    assert!(matches!(
-        err.raw_os_error(),
-        Some(libc::EROFS | libc::EACCES | libc::EPERM)
-    ));
-    assert_eq!(fs::read_to_string(local.join("file")).unwrap(), "hello");
+    fs::write(mountpoint.join("data/file"), "new").unwrap();
+    assert_eq!(fs::read_to_string(local.join("file")).unwrap(), "new");
 }
 
 #[test]
