@@ -26,7 +26,7 @@ Static filesystem policy is awkward for that workflow:
 
 `sandboxfs` does not have a persistent configuration file. Agent wrappers should initialize policy through ordinary commands each time they start a session.
 
-This keeps each integration explicit and avoids a configuration format that grows with every new compatibility need. For example, an AI agent wrapper can decide at startup which paths are visible, which PATH directories are write-protected, which lock directories need passthrough, and which operations should become pending authorization requests.
+This keeps each integration explicit and avoids a configuration format that grows with every new compatibility need. For example, an AI agent wrapper can decide at startup which paths are visible, which PATH directories are write-protected, which lock directories need bypass rules, and which operations should become pending authorization requests.
 
 ## Relationship to Bubblewrap and similar tools
 

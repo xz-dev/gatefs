@@ -36,6 +36,6 @@ The log writer is a serialized event loop. FUSE and control paths publish events
 ## Current limitations
 
 - `sandboxfs` is not a complete process sandbox or security boundary by itself; use it with an existing sandboxing or runtime isolation tool when process isolation is required.
-- File content and directory structure writes are read-only unless a path matches an explicit passthrough rule for a supported operation. In this version, `passthrough-write` enables lock-directory `mkdir`/`rmdir` passthrough, and `passthrough-metadata` enables timestamp and xattr metadata passthrough for matching visible paths. Other create/write/truncate/unlink/rename operations still return read-only or unsupported errors and never modify underlying files.
+- Protection and bypass are evaluated per filesystem effect. A matching `bypass-write` automatically allows write effects but does not bypass `protect-metadata` for metadata side effects.
 - Real FUSE behavior depends on `/dev/fuse` and `fusermount3` availability and permissions.
 - The project is experimental.

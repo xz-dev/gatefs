@@ -1,6 +1,14 @@
-# Policy, protection, passthrough, and grants
+# Policy, bypass rules, protection, and grants
 
-`sandboxfs` has explicit policy layers for read, write, and metadata operations.
+`sandboxfs` evaluates policy per filesystem effect. An effect has a policy layer (`READ`, `WRITE`, or `METADATA`) and a sandbox path.
+
+For each effect:
+
+1. a matching `bypass-*` rule automatically allows the effect without creating a pending request;
+2. otherwise, a matching `protect-*` rule creates a pending authorization request;
+3. otherwise, the effect is allowed by default.
+
+The operation may execute only when all of its effects are allowed. If any effect is denied or canceled, the whole operation fails.
 
 ## Protection rules
 
@@ -22,7 +30,7 @@ sandboxfs demo unprotect-metadata '/data/**'
 sandboxfs demo list-protection --metadata
 ```
 
-A matching protected operation becomes a pending authorization request. Inspect or resolve it with:
+A matching protected effect becomes a pending authorization request. Inspect or resolve it with:
 
 ```sh
 sandboxfs demo allow
@@ -36,7 +44,27 @@ sandboxfs-access-tui demo
 
 Inspecting pending requests is read-only. Multiple CLI tools or Access TUI instances may view the same foreground session socket concurrently. `allow`, `allow --do-nothing`, `deny`, or lifecycle `cancel` resolves and removes a pending request. `cancel-all` cancels all pending requests in the sandbox, or only pending requests from the attached view identified by `<mountpoint>` when a mountpoint is provided.
 
-`allow --do-nothing` releases the blocked FUSE request without changing sandbox metadata or underlying files.
+`allow --do-nothing` releases the blocked FUSE request according to the normal do-nothing semantics for that request.
+
+## Bypass rules
+
+Bypass rules are automatic-allow exclusions from protection rules:
+
+```sh
+sandboxfs demo bypass-read '/data/**'
+sandboxfs demo bypass-write '/data/**'
+sandboxfs demo bypass-metadata '/data/**'
+sandboxfs demo unbypass-read '/data/**'
+sandboxfs demo unbypass-write '/data/**'
+sandboxfs demo unbypass-metadata '/data/**'
+sandboxfs demo list-bypass [--read] [--write] [--metadata]
+```
+
+`bypass-*` rules are layer-specific. `bypass-write` automatically allows matching write effects, but it does not bypass metadata protection. `bypass-metadata` automatically allows matching metadata effects, but it does not bypass write protection.
+
+This matters because a single FUSE operation can have multiple effects. For example, truncate changes file size/content semantics, so it has a `WRITE` effect, but it also updates metadata. If `protect-metadata` matches and `bypass-metadata` does not, truncate must not automatically succeed even when its write effect is otherwise allowed or covered by `bypass-write`.
+
+Hard link is another multi-effect operation: the source path has a `METADATA` effect because the source inode's link count and ctime change, while the destination path has a `WRITE` effect because a new directory entry is created.
 
 ## Grants
 
@@ -52,27 +80,9 @@ sandboxfs demo allow <operation_id> --path <sandbox-glob> --tree
 
 `--path <sandbox-glob>` chooses the grant path pattern. `--duration` or `--duration=<duration>` creates a duration grant; the default is 30 minutes. `--tree` snapshots the requester's current process tree instead of the exact requester process. If grant options are present without `--duration`, the grant is one-shot.
 
-## Passthrough rules
-
-Passthrough rules are layer-specific:
-
-```sh
-sandboxfs demo passthrough-read '/data/**'
-sandboxfs demo passthrough-write '/data/**'
-sandboxfs demo passthrough-metadata '/data/**'
-sandboxfs demo unpassthrough-read '/data/**'
-sandboxfs demo unpassthrough-write '/data/**'
-sandboxfs demo unpassthrough-metadata '/data/**'
-sandboxfs demo list-passthrough [--read] [--write] [--metadata]
-```
-
-`passthrough-read` and `passthrough-write` apply only to read/write operations. `passthrough-metadata` applies only to metadata operations. `passthrough-write` does not bypass metadata policy.
-
-In this version, `passthrough-write` enables lock-directory `mkdir`/`rmdir` passthrough for matching visible paths. Other create/write/truncate/unlink/rename operations still return read-only or unsupported errors and never modify underlying files.
-
 ## Pattern semantics
 
-A passthrough or protection pattern is a sandbox namespace glob:
+A bypass or protection pattern is a sandbox namespace glob:
 
 - `/a/b` matches that exact file or directory.
 - `/a/b/` is directory-only.

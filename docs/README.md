@@ -6,7 +6,7 @@
 
 - [Concepts and lifecycle](user-guide/concepts.md)
 - [Command reference](user-guide/commands.md)
-- [Policy, protection, passthrough, and grants](user-guide/policy.md)
+- [Policy, bypass rules, protection, and grants](user-guide/policy.md)
 - [Metadata operations](user-guide/metadata.md)
 - [Logs, runtime paths, and limitations](user-guide/runtime-and-limits.md)
 - [AI agent wrapper notes](user-guide/ai-agent-wrapper.md)

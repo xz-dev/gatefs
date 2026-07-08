@@ -27,7 +27,7 @@ For example, an integration script can:
 1. start `sandboxfs run <name>`;
 2. mount selected host paths into the sandbox namespace;
 3. hide broad areas that should not be visible;
-4. add `protect-*` and `passthrough-*` rules;
+4. add `protect-*` and `bypass-*` rules;
 5. attach the FUSE view;
 6. run the target process inside an existing sandbox/container boundary.
 

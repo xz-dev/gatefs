@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted.
+Accepted, partially superseded by [ADR 0007](0007-bypass-and-effect-based-authorization.md).
+
+ADR 0007 supersedes this ADR's `passthrough-*` naming and the intentionally narrow `passthrough-write` behavior. The layer split and glob pattern semantics remain applicable.
 
 ## Context
 

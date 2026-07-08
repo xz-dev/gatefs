@@ -91,7 +91,7 @@ Ctrl-C in the `sandboxfs run demo` terminal also stops the session.
 - [Documentation index](docs/README.md)
 - [Concepts and lifecycle](docs/user-guide/concepts.md)
 - [Command reference](docs/user-guide/commands.md)
-- [Policy, protection, passthrough, and grants](docs/user-guide/policy.md)
+- [Policy, bypass rules, protection, and grants](docs/user-guide/policy.md)
 - [Metadata operations](docs/user-guide/metadata.md)
 - [Logs, runtime paths, and limitations](docs/user-guide/runtime-and-limits.md)
 - [AI agent wrapper notes](docs/user-guide/ai-agent-wrapper.md)
@@ -102,4 +102,4 @@ Ctrl-C in the `sandboxfs run demo` terminal also stops the session.
 
 `sandboxfs` is experimental. It is not a complete process sandbox or security boundary by itself; use it with an existing sandboxing or runtime isolation tool when process isolation is required.
 
-In this version, file content and directory structure writes are read-only unless a path matches an explicit passthrough rule for a supported operation. `passthrough-write` currently enables lock-directory `mkdir`/`rmdir` passthrough, and `passthrough-metadata` enables timestamp and xattr metadata passthrough for matching visible paths. Other create/write/truncate/unlink/rename operations still return read-only or unsupported errors and never modify underlying files.
+Protection and bypass are evaluated per filesystem effect. `protect-*` asks before a matching read, write, or metadata effect; `bypass-*` automatically allows a matching effect without creating a pending request. `bypass-write` does not bypass metadata protection, so operations with metadata side effects can still require metadata authorization when `protect-metadata` matches.

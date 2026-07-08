@@ -21,14 +21,14 @@ chmod 444 "$DEMO_MNT/file.txt"
 
 That protected request becomes pending and can be resolved through the normal pending authorization flow.
 
-## Metadata passthrough
+## Metadata bypass
 
-Use `passthrough-metadata` when matching metadata operations should be forwarded to the backing host filesystem:
+Use `bypass-metadata` when matching metadata effects should be automatically allowed without pending authorization:
 
 ```sh
-sandboxfs demo passthrough-metadata '/path/to/file.lock'
+sandboxfs demo bypass-metadata '/path/to/file.lock'
 ```
 
-In this version, metadata passthrough includes timestamp and xattr metadata passthrough for matching visible paths.
+`bypass-metadata` is layer-specific. It does not bypass read or write protection, and `bypass-write` does not bypass metadata protection.
 
-See [Policy, protection, passthrough, and grants](policy.md) for the full policy model.
+See [Policy, bypass rules, protection, and grants](policy.md) for the full policy model.

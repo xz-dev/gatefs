@@ -15,14 +15,14 @@ sandboxfs <name> protect-metadata <pattern>
 sandboxfs <name> unprotect-read <pattern>
 sandboxfs <name> unprotect-write <pattern>
 sandboxfs <name> unprotect-metadata <pattern>
-sandboxfs <name> passthrough-read <pattern>
-sandboxfs <name> passthrough-write <pattern>
-sandboxfs <name> passthrough-metadata <pattern>
-sandboxfs <name> unpassthrough-read <pattern>
-sandboxfs <name> unpassthrough-write <pattern>
-sandboxfs <name> unpassthrough-metadata <pattern>
+sandboxfs <name> bypass-read <pattern>
+sandboxfs <name> bypass-write <pattern>
+sandboxfs <name> bypass-metadata <pattern>
+sandboxfs <name> unbypass-read <pattern>
+sandboxfs <name> unbypass-write <pattern>
+sandboxfs <name> unbypass-metadata <pattern>
 sandboxfs <name> list-protection [--read] [--write] [--metadata]
-sandboxfs <name> list-passthrough [--read] [--write] [--metadata]
+sandboxfs <name> list-bypass [--read] [--write] [--metadata]
 sandboxfs <name> chmod ...
 sandboxfs <name> chown ...
 sandboxfs <name> chattr ...
@@ -42,6 +42,6 @@ sandboxfs-access-tui <name>
 See also:
 
 - [Concepts and lifecycle](concepts.md)
-- [Policy, protection, passthrough, and grants](policy.md)
+- [Policy, bypass rules, protection, and grants](policy.md)
 - [Metadata operations](metadata.md)
 - [Logs, runtime paths, and limitations](runtime-and-limits.md)
