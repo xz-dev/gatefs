@@ -18,6 +18,10 @@ rustc-ice-*.txt
 
 # Pi agent local runtime/memory state
 .pi/
+.serena/
+
+# Local feature worktrees
+.worktrees/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
