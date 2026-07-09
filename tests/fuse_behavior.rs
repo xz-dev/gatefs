@@ -398,14 +398,12 @@ fn attach_xattr_bypass_does_not_follow_symlink_inode() {
     assert_eq!(err.raw_os_error(), Some(libc::ENODATA));
 }
 
-#[test]
-#[ignore]
-fn protected_xattr_write_is_gated_by_xattr_policy() {
+fn protected_xattr_write_is_gated_by_policy(protection_command: &str, session_name: &str) {
     require_fuse();
     if !fuse_enabled() {
         return;
     }
-    let session = RunningSession::start("demo_fuse_xattr_specific_gate");
+    let session = RunningSession::start(session_name);
     let local = session.temp.path().join("local");
     let mountpoint = session.temp.path().join("mnt");
     fs::create_dir_all(&local).unwrap();
@@ -419,7 +417,7 @@ fn protected_xattr_write_is_gated_by_xattr_policy() {
         .success();
     session
         .sandbox_cmd()
-        .args(["protect-xattr", "/data/**"])
+        .args([protection_command, "/data/**"])
         .assert()
         .success();
     session
@@ -432,10 +430,7 @@ fn protected_xattr_write_is_gated_by_xattr_policy() {
         let path = mountpoint.join("data/file");
         move || set_xattr(&path, "user.gated", b"value")
     });
-    wait_for_pending(&session, "SETXATTR name=user.gated");
-    let pending =
-        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
-    let id = pending.split_whitespace().next().unwrap().to_string();
+    let id = wait_for_pending(&session, "SETXATTR name=user.gated");
     assert!(get_xattr(&local.join("file"), "user.gated").is_err());
     session
         .sandbox_cmd()
@@ -454,6 +449,18 @@ fn protected_xattr_write_is_gated_by_xattr_policy() {
         &[" pending ", "path=/data/file SETXATTR name=user.gated"],
     );
     assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
+}
+
+#[test]
+#[ignore]
+fn protected_xattr_write_is_gated_by_xattr_policy() {
+    protected_xattr_write_is_gated_by_policy("protect-xattr", "demo_fuse_xattr_specific_gate");
+}
+
+#[test]
+#[ignore]
+fn protected_xattr_write_is_gated_by_metadata_policy() {
+    protected_xattr_write_is_gated_by_policy("protect-metadata", "demo_fuse_xattr_metadata_gate");
 }
 
 #[test]
@@ -513,14 +520,12 @@ fn xattr_bypass_releases_metadata_protected_xattr_but_not_chmod() {
     assert!(!child.wait().unwrap().success());
 }
 
-#[test]
-#[ignore]
-fn protected_removexattr_write_is_gated_by_xattr_policy() {
+fn protected_removexattr_write_is_gated_by_policy(protection_command: &str, session_name: &str) {
     require_fuse();
     if !fuse_enabled() {
         return;
     }
-    let session = RunningSession::start("demo_fuse_removexattr_metadata_gate");
+    let session = RunningSession::start(session_name);
     let local = session.temp.path().join("local");
     let mountpoint = session.temp.path().join("mnt");
     fs::create_dir_all(&local).unwrap();
@@ -535,7 +540,7 @@ fn protected_removexattr_write_is_gated_by_xattr_policy() {
         .success();
     session
         .sandbox_cmd()
-        .args(["protect-xattr", "/data/**"])
+        .args([protection_command, "/data/**"])
         .assert()
         .success();
     session
@@ -548,14 +553,11 @@ fn protected_removexattr_write_is_gated_by_xattr_policy() {
         let path = mountpoint.join("data/file");
         move || remove_xattr(&path, "user.gated_remove")
     });
-    wait_for_pending(&session, "REMOVEXATTR name=user.gated_remove");
+    let id = wait_for_pending(&session, "REMOVEXATTR name=user.gated_remove");
     assert_eq!(
         get_xattr(&local.join("file"), "user.gated_remove").unwrap(),
         b"value"
     );
-    let pending =
-        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
-    let id = pending.split_whitespace().next().unwrap().to_string();
     session
         .sandbox_cmd()
         .args(["allow", &id])
@@ -574,6 +576,24 @@ fn protected_removexattr_write_is_gated_by_xattr_policy() {
         ],
     );
     assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
+}
+
+#[test]
+#[ignore]
+fn protected_removexattr_write_is_gated_by_xattr_policy() {
+    protected_removexattr_write_is_gated_by_policy(
+        "protect-xattr",
+        "demo_fuse_removexattr_specific_gate",
+    );
+}
+
+#[test]
+#[ignore]
+fn protected_removexattr_write_is_gated_by_metadata_policy() {
+    protected_removexattr_write_is_gated_by_policy(
+        "protect-metadata",
+        "demo_fuse_removexattr_metadata_gate",
+    );
 }
 
 #[test]
