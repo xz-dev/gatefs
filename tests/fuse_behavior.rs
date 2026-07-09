@@ -118,6 +118,38 @@ fn pending_ids(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn wait_for_pending(session: &RunningSession, expected: &str) -> String {
+    let mut observed = String::new();
+    assert!(
+        wait_until(Duration::from_secs(3), || {
+            let Ok(out) = session.sandbox_cmd().arg("allow").output() else {
+                return false;
+            };
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = stdout.lines().find(|line| line.contains(expected)) {
+                observed = line
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                return !observed.is_empty();
+            }
+            false
+        }),
+        "pending operation was not observed: {expected}"
+    );
+    observed
+}
+
+fn assert_no_pending(session: &RunningSession) {
+    let pending =
+        String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
+    assert!(
+        pending.trim().is_empty(),
+        "unexpected pending requests: {pending}"
+    );
+}
+
 fn c_string_path(path: &Path) -> std::ffi::CString {
     c_string(path.as_os_str())
 }
@@ -368,12 +400,12 @@ fn attach_xattr_bypass_does_not_follow_symlink_inode() {
 
 #[test]
 #[ignore]
-fn protected_xattr_write_is_metadata_gated() {
+fn protected_xattr_write_is_gated_by_xattr_policy() {
     require_fuse();
     if !fuse_enabled() {
         return;
     }
-    let session = RunningSession::start("demo_fuse_xattr_metadata_gate");
+    let session = RunningSession::start("demo_fuse_xattr_specific_gate");
     let local = session.temp.path().join("local");
     let mountpoint = session.temp.path().join("mnt");
     fs::create_dir_all(&local).unwrap();
@@ -387,7 +419,7 @@ fn protected_xattr_write_is_metadata_gated() {
         .success();
     session
         .sandbox_cmd()
-        .args(["protect-metadata", "/data/**"])
+        .args(["protect-xattr", "/data/**"])
         .assert()
         .success();
     session
@@ -400,14 +432,7 @@ fn protected_xattr_write_is_metadata_gated() {
         let path = mountpoint.join("data/file");
         move || set_xattr(&path, "user.gated", b"value")
     });
-    assert!(wait_until(Duration::from_secs(3), || {
-        session
-            .sandbox_cmd()
-            .arg("allow")
-            .output()
-            .map(|out| String::from_utf8_lossy(&out.stdout).contains("SETXATTR name=user.gated"))
-            .unwrap_or(false)
-    }));
+    wait_for_pending(&session, "SETXATTR name=user.gated");
     let pending =
         String::from_utf8(session.sandbox_cmd().arg("allow").output().unwrap().stdout).unwrap();
     let id = pending.split_whitespace().next().unwrap().to_string();
@@ -433,7 +458,64 @@ fn protected_xattr_write_is_metadata_gated() {
 
 #[test]
 #[ignore]
-fn protected_removexattr_write_is_metadata_gated() {
+fn xattr_bypass_releases_metadata_protected_xattr_but_not_chmod() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_specific_bypass");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-metadata", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["bypass-xattr", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    set_xattr(&mountpoint.join("data/file"), "user.allowed", b"value").unwrap();
+    assert_eq!(
+        get_xattr(&local.join("file"), "user.allowed").unwrap(),
+        b"value"
+    );
+    assert_no_pending(&session);
+
+    let chmod_path = mountpoint.join("data/file");
+    let mut child = std::process::Command::new("chmod")
+        .arg("600")
+        .arg(&chmod_path)
+        .spawn()
+        .unwrap();
+    let pending_id = wait_for_pending(&session, "SETATTR mode=0600");
+    session
+        .sandbox_cmd()
+        .args(["deny", pending_id.as_str()])
+        .assert()
+        .success();
+    assert!(!child.wait().unwrap().success());
+}
+
+#[test]
+#[ignore]
+fn protected_removexattr_write_is_gated_by_xattr_policy() {
     require_fuse();
     if !fuse_enabled() {
         return;
@@ -453,7 +535,7 @@ fn protected_removexattr_write_is_metadata_gated() {
         .success();
     session
         .sandbox_cmd()
-        .args(["protect-metadata", "/data/**"])
+        .args(["protect-xattr", "/data/**"])
         .assert()
         .success();
     session
@@ -466,16 +548,7 @@ fn protected_removexattr_write_is_metadata_gated() {
         let path = mountpoint.join("data/file");
         move || remove_xattr(&path, "user.gated_remove")
     });
-    assert!(wait_until(Duration::from_secs(3), || {
-        session
-            .sandbox_cmd()
-            .arg("allow")
-            .output()
-            .map(|out| {
-                String::from_utf8_lossy(&out.stdout).contains("REMOVEXATTR name=user.gated_remove")
-            })
-            .unwrap_or(false)
-    }));
+    wait_for_pending(&session, "REMOVEXATTR name=user.gated_remove");
     assert_eq!(
         get_xattr(&local.join("file"), "user.gated_remove").unwrap(),
         b"value"

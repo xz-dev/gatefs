@@ -224,6 +224,28 @@ impl SandboxFs {
         Ok(sandbox.is_bypass(kind, path, target_is_dir))
     }
 
+    fn xattr_mutation_bypassed_or_protected(
+        &self,
+        path: &SandboxPath,
+    ) -> std::result::Result<(bool, bool), Errno> {
+        let target_is_dir = self.path_is_directory(path)?;
+        let bypass_metadata =
+            self.path_matches_bypass(ProtectionKind::Metadata, path, target_is_dir)?;
+        let bypass_xattr = self.path_matches_bypass(ProtectionKind::Xattr, path, target_is_dir)?;
+        let registry = self.registry.lock().unwrap();
+        let sandbox = registry
+            .sandboxes
+            .get(&self.sandbox_name)
+            .ok_or(Errno::ENOENT)?;
+        let protect_metadata = sandbox.is_protected(ProtectionKind::Metadata, path, target_is_dir);
+        let protect_xattr = sandbox.is_protected(ProtectionKind::Xattr, path, target_is_dir);
+        drop(registry);
+        Ok((
+            bypass_metadata || bypass_xattr,
+            protect_metadata || protect_xattr,
+        ))
+    }
+
     fn is_trusted_operation(
         registry: &SandboxRegistry,
         sandbox_name: &str,
@@ -336,7 +358,14 @@ impl SandboxFs {
             return Err(Errno::ENOENT);
         };
         let target_is_dir = sandbox.path_is_directory(&path);
-        if !sandbox.is_protected(ProtectionKind::Metadata, &path, target_is_dir) {
+        let requires_metadata_protection = kinds.iter().any(|kind| match kind {
+            crate::state::PendingOperationKind::Xattr => {
+                sandbox.is_protected(ProtectionKind::Metadata, &path, target_is_dir)
+                    || sandbox.is_protected(ProtectionKind::Xattr, &path, target_is_dir)
+            }
+            _ => sandbox.is_protected(ProtectionKind::Metadata, &path, target_is_dir),
+        });
+        if !requires_metadata_protection {
             let sandbox = registry
                 .sandboxes
                 .get_mut(&self.sandbox_name)
@@ -1188,14 +1217,21 @@ impl Filesystem for SandboxFs {
             path: path.clone(),
             name: name.to_string_lossy().into_owned(),
         };
-        if self
-            .path_matches_bypass(
-                ProtectionKind::Metadata,
-                &path,
-                self.path_is_directory(&path).unwrap_or(false),
-            )
-            .unwrap_or(false)
-        {
+        let (bypass, protected) = match self.xattr_mutation_bypassed_or_protected(&path) {
+            Ok(status) => status,
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        };
+        if bypass {
+            match hostfs::setxattr(&local_path, name, value, flags) {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(io_to_errno(err)),
+            }
+            return;
+        }
+        if !protected {
             match hostfs::setxattr(&local_path, name, value, flags) {
                 Ok(()) => reply.ok(),
                 Err(err) => reply.error(io_to_errno(err)),
@@ -1228,7 +1264,6 @@ impl Filesystem for SandboxFs {
             Err(err) => reply.error(err),
         }
     }
-
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
         let Some(local_path) = self.local_path_for_ino(ino) else {
             reply.error(Errno::ENOENT);
@@ -1264,14 +1299,21 @@ impl Filesystem for SandboxFs {
             path: path.clone(),
             name: name.to_string_lossy().into_owned(),
         };
-        if self
-            .path_matches_bypass(
-                ProtectionKind::Metadata,
-                &path,
-                self.path_is_directory(&path).unwrap_or(false),
-            )
-            .unwrap_or(false)
-        {
+        let (bypass, protected) = match self.xattr_mutation_bypassed_or_protected(&path) {
+            Ok(status) => status,
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        };
+        if bypass {
+            match hostfs::removexattr(&local_path, name) {
+                Ok(()) => reply.ok(),
+                Err(err) => reply.error(io_to_errno(err)),
+            }
+            return;
+        }
+        if !protected {
             match hostfs::removexattr(&local_path, name) {
                 Ok(()) => reply.ok(),
                 Err(err) => reply.error(io_to_errno(err)),
