@@ -8,15 +8,19 @@ Accepted.
 
 Extended attributes are filesystem-specific metadata. Some xattrs, such as SELinux labels, file capabilities, ACL-related attributes, and other `security.*`, `system.*`, or `trusted.*` namespaces, may describe the backing host filesystem or host security context rather than a distinct gatefs context. Exposing those values through gatefs can therefore look odd or inaccurate from the sandbox namespace's point of view.
 
-However, partially filtering, synthesizing, or emulating xattrs in gatefs would create a second behavior model that is likely to be less stable and less reproducible than the backing filesystem's behavior. gatefs already explicitly manages a small set of metadata surfaces such as mode, uid, gid, inode flags, and timestamps through sandbox-local policy/override handling. xattrs are not part of that managed surface.
+However, partially filtering, synthesizing, or emulating xattrs in gatefs would create a second behavior model that is likely to be less stable and less reproducible than the backing filesystem's behavior. gatefs already explicitly manages a small set of metadata surfaces such as mode, uid, gid, inode flags, and timestamps through sandbox-local policy/override handling. xattrs are not part of that managed surface, so xattr mutations need their own policy granularity rather than virtualization.
 
 ## Decision
 
-gatefs treats xattr operations as thin passthrough to the resolved backing filesystem path.
+gatefs treats xattr operations as forwarding to the resolved backing filesystem path after policy allows them.
 
 `getxattr` and `listxattr` are metadata probes, not protected READ operations. They resolve the sandbox namespace path, reject hidden or virtual-only paths as unavailable, then call the backing filesystem and preserve its support and errno behavior.
 
 `setxattr` and `removexattr` are backing-host metadata mutations. Because gatefs does not manage xattr overlays, allowed xattr writes are not converted into sandbox-local overrides. They are forwarded to the backing filesystem and preserve its support and errno behavior.
+
+`protect-xattr` and `bypass-xattr` apply only to xattr mutation effects. They control `setxattr` and `removexattr`; they do not gate `getxattr` or `listxattr`.
+
+`protect-metadata` and `bypass-metadata` remain broader metadata controls and continue to include xattr mutations. A matching xattr bypass or metadata bypass automatically allows an xattr mutation that would otherwise be pending under either xattr-specific or metadata protection.
 
 gatefs does not filter, synthesize, or specially interpret `security.*`, `system.*`, `trusted.*`, SELinux, capability, ACL, or other xattr namespaces in this decision. Those values may reflect backing-host context, but host passthrough is reproducible. Partial gatefs emulation is more likely to produce unstable and surprising behavior.
 
@@ -28,4 +32,4 @@ Tools that use xattrs observe backing filesystem behavior instead of fuser's def
 
 Some xattr values may not describe an independent gatefs security context. This is accepted for the current design because gatefs is a namespace and authorization shim, not an LSM or xattr virtualization layer.
 
-xattr behavior intentionally differs from gatefs-managed metadata overrides. Changes to mode, uid, gid, flags, and timestamps remain sandbox-local/policy-managed where implemented, while xattr mutations pass through to the host.
+xattr behavior intentionally differs from gatefs-managed metadata overrides. Changes to mode, uid, gid, flags, and timestamps remain sandbox-local/policy-managed where implemented, while xattr mutations forward to the host after the relevant protection or bypass rule allows them.

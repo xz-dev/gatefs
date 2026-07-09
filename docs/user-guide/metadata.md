@@ -21,6 +21,23 @@ chmod 444 "$DEMO_MNT/file.txt"
 
 That protected request becomes pending and can be resolved through the normal pending authorization flow.
 
+## Xattr mutations
+
+Xattr mutations are forwarded to the backing filesystem after policy allows them. They are not virtualized into sandbox-local overrides.
+
+Use xattr-specific protection and bypass rules when you want `setxattr` or `removexattr` to participate in policy:
+
+```sh
+gatefs demo protect-xattr '/data/**'
+gatefs demo bypass-xattr '/data/cache/**'
+gatefs demo unprotect-xattr '/data/**'
+gatefs demo unbypass-xattr '/data/cache/**'
+```
+
+`protect-xattr` and `bypass-xattr` apply only to xattr mutation effects. They do not gate `getxattr` or `listxattr`, which remain ungated metadata probes.
+
+`protect-metadata` and `bypass-metadata` remain broader controls and continue to include xattr mutations. A matching xattr bypass or metadata bypass automatically allows an xattr mutation that would otherwise be pending under either xattr-specific or metadata protection.
+
 ## Metadata bypass
 
 Use `bypass-metadata` when matching metadata effects should be automatically allowed without pending authorization:

@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-ADR 0006 introduced per-layer passthrough rules as a narrow compatibility mechanism, primarily for AI-agent lock-directory workflows. That naming and behavior made the policy model harder to reason about: `passthrough-write` sounded like a partial host-filesystem write implementation, while the intended user-facing need is simpler.
+ADR 0006 introduced per-layer `passthrough-*` rules as a narrow compatibility mechanism, primarily for AI-agent lock-directory workflows. That naming and behavior made the policy model harder to reason about: `passthrough-write` sounded like a partial host-filesystem write implementation, while the intended user-facing need is simpler.
 
 The policy question users need to answer is not "which internal write operations has gatefs implemented as passthrough?" It is:
 
@@ -18,7 +18,7 @@ FUSE exposes filesystem operations, not the originating shell command. A single 
 
 ## Decision
 
-gatefs renames `passthrough-*` to `bypass-*` and defines bypass rules as automatic-allow exclusions from protection rules.
+gatefs uses `bypass-*` for automatic-allow exclusions from protection rules. There is no `passthrough-*` command surface for policy exclusions.
 
 The command surface is:
 
@@ -26,13 +26,15 @@ The command surface is:
 gatefs <name> bypass-read <glob>
 gatefs <name> bypass-write <glob>
 gatefs <name> bypass-metadata <glob>
+gatefs <name> bypass-xattr <glob>
 gatefs <name> unbypass-read <glob>
 gatefs <name> unbypass-write <glob>
 gatefs <name> unbypass-metadata <glob>
-gatefs <name> list-bypass [--read] [--write] [--metadata]
+gatefs <name> unbypass-xattr <glob>
+gatefs <name> list-bypass [--read] [--write] [--metadata] [--xattr]
 ```
 
-`bypass-*` rules are layer-specific. A matching `bypass-write` automatically allows the matching write effect; it does not bypass metadata effects. A matching `bypass-metadata` automatically allows the matching metadata effect; it does not bypass write effects.
+`bypass-*` rules are layer-specific. A matching `bypass-write` automatically allows the matching write effect; it does not bypass metadata effects. A matching `bypass-metadata` automatically allows the matching metadata effect; it does not bypass write effects. A matching `bypass-xattr` automatically allows matching xattr mutation effects only; it does not bypass chmod, chown, chattr, timestamp, read, or write effects. Because xattr mutations are also metadata effects for broad metadata policy, either `bypass-xattr` or `bypass-metadata` automatically allows a matching xattr mutation that would otherwise be pending under `protect-xattr` or `protect-metadata`.
 
 Authorization is evaluated per filesystem effect, not per command name. Each effect has a policy layer (`READ`, `WRITE`, or `METADATA`) and a sandbox path. For each effect:
 
@@ -72,4 +74,4 @@ If any affected effect is protected and not bypassed, the operation must pending
 
 The user-facing model becomes simpler: `protect-*` means "ask before this effect" and `bypass-*` means "automatically allow this effect." There is no separate "passthrough" vocabulary in commands, logs, IPC output, examples, or documentation.
 
-ADR 0006 remains historical context for the split between read/write and metadata policy layers and for glob pattern semantics, but this ADR supersedes ADR 0006's `passthrough-*` naming and its narrow `passthrough-write` behavior. Write authorization should no longer mean "allow the request and then still return EROFS" for write operations that gatefs exposes as protectable. If a protected write effect is allowed, gatefs should forward the corresponding filesystem operation to the backing filesystem unless another protected effect, such as metadata, blocks the operation. Backing filesystem or kernel support is authoritative for operations such as `mknod`: gatefs authorizes and forwards the effect, then returns the backing syscall errno if that filesystem, mount, process, or kernel policy rejects it.
+ADR 0006 remains historical context for the split between read/write and metadata policy layers and for glob pattern semantics, but this ADR supersedes ADR 0006's historical `passthrough-*` naming and its narrow `passthrough-write` behavior. Write authorization should no longer mean "allow the request and then still return EROFS" for write operations that gatefs exposes as protectable. If a protected write effect is allowed, gatefs should forward the corresponding filesystem operation to the backing filesystem unless another protected effect, such as metadata, blocks the operation. Backing filesystem or kernel support is authoritative for operations such as `mknod`: gatefs authorizes and forwards the effect, then returns the backing syscall errno if that filesystem, mount, process, or kernel policy rejects it.

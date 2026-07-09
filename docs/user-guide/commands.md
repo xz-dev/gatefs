@@ -12,17 +12,21 @@ gatefs <name> hide <on_fs>
 gatefs <name> protect-read <pattern>
 gatefs <name> protect-write <pattern>
 gatefs <name> protect-metadata <pattern>
+gatefs <name> protect-xattr <pattern>
 gatefs <name> unprotect-read <pattern>
 gatefs <name> unprotect-write <pattern>
 gatefs <name> unprotect-metadata <pattern>
+gatefs <name> unprotect-xattr <pattern>
 gatefs <name> bypass-read <pattern>
 gatefs <name> bypass-write <pattern>
 gatefs <name> bypass-metadata <pattern>
+gatefs <name> bypass-xattr <pattern>
 gatefs <name> unbypass-read <pattern>
 gatefs <name> unbypass-write <pattern>
 gatefs <name> unbypass-metadata <pattern>
-gatefs <name> list-protection [--read] [--write] [--metadata]
-gatefs <name> list-bypass [--read] [--write] [--metadata]
+gatefs <name> unbypass-xattr <pattern>
+gatefs <name> list-protection [--read] [--write] [--metadata] [--xattr]
+gatefs <name> list-bypass [--read] [--write] [--metadata] [--xattr]
 gatefs <name> chmod ...
 gatefs <name> chown ...
 gatefs <name> chattr ...
