@@ -214,8 +214,14 @@ impl ProtectionRuleResult {
 pub enum ReadWriteOperation {
     ReadFile { path: SandboxPath },
     ReadDirectory { path: SandboxPath },
+    GetXattrRead { path: SandboxPath, name: String },
+    GetXattr { path: SandboxPath, name: String },
+    ListXattrRead { path: SandboxPath },
+    ListXattr { path: SandboxPath },
     OpenWrite { path: SandboxPath },
     WriteFile { path: SandboxPath },
+    SetXattr { path: SandboxPath, name: String },
+    RemoveXattr { path: SandboxPath, name: String },
     Truncate { path: SandboxPath },
     Create { path: SandboxPath },
     Mkdir { path: SandboxPath },
@@ -247,6 +253,26 @@ impl ReadWriteOperation {
                 path.clone(),
                 format!("path={path} READ directory"),
             )],
+            Self::GetXattrRead { path, name } => vec![ReadWriteEffect::new(
+                ProtectionKind::Read,
+                path.clone(),
+                format!("path={path} READ GETXATTR name={name}"),
+            )],
+            Self::GetXattr { path, name } => vec![ReadWriteEffect::new(
+                ProtectionKind::Xattr,
+                path.clone(),
+                format!("path={path} XATTR GETXATTR name={name}"),
+            )],
+            Self::ListXattrRead { path } => vec![ReadWriteEffect::new(
+                ProtectionKind::Read,
+                path.clone(),
+                format!("path={path} READ LISTXATTR"),
+            )],
+            Self::ListXattr { path } => vec![ReadWriteEffect::new(
+                ProtectionKind::Xattr,
+                path.clone(),
+                format!("path={path} XATTR LISTXATTR"),
+            )],
             Self::OpenWrite { path } => vec![ReadWriteEffect::new(
                 ProtectionKind::Write,
                 path.clone(),
@@ -256,6 +282,16 @@ impl ReadWriteOperation {
                 ProtectionKind::Write,
                 path.clone(),
                 format!("path={path} WRITE data"),
+            )],
+            Self::SetXattr { path, name } => vec![ReadWriteEffect::new(
+                ProtectionKind::Write,
+                path.clone(),
+                format!("path={path} WRITE SETXATTR name={name}"),
+            )],
+            Self::RemoveXattr { path, name } => vec![ReadWriteEffect::new(
+                ProtectionKind::Write,
+                path.clone(),
+                format!("path={path} WRITE REMOVEXATTR name={name}"),
             )],
             Self::Truncate { path } => vec![
                 ReadWriteEffect::new(
@@ -330,8 +366,14 @@ impl ReadWriteOperation {
         match self {
             Self::ReadFile { path }
             | Self::ReadDirectory { path }
+            | Self::GetXattrRead { path, .. }
+            | Self::GetXattr { path, .. }
+            | Self::ListXattrRead { path }
+            | Self::ListXattr { path }
             | Self::OpenWrite { path }
             | Self::WriteFile { path }
+            | Self::SetXattr { path, .. }
+            | Self::RemoveXattr { path, .. }
             | Self::Truncate { path }
             | Self::Create { path }
             | Self::Mkdir { path }
@@ -358,8 +400,18 @@ impl ReadWriteOperation {
         match self {
             Self::ReadFile { path } => format!("path={path} READ file"),
             Self::ReadDirectory { path } => format!("path={path} READ directory"),
+            Self::GetXattrRead { path, name } => {
+                format!("path={path} READ GETXATTR name={name}")
+            }
+            Self::GetXattr { path, name } => format!("path={path} XATTR GETXATTR name={name}"),
+            Self::ListXattrRead { path } => format!("path={path} READ LISTXATTR"),
+            Self::ListXattr { path } => format!("path={path} XATTR LISTXATTR"),
             Self::OpenWrite { path } => format!("path={path} WRITE open"),
             Self::WriteFile { path } => format!("path={path} WRITE data"),
+            Self::SetXattr { path, name } => format!("path={path} WRITE SETXATTR name={name}"),
+            Self::RemoveXattr { path, name } => {
+                format!("path={path} WRITE REMOVEXATTR name={name}")
+            }
             Self::Truncate { path } => format!("path={path} WRITE truncate"),
             Self::Create { path } => format!("path={path} WRITE create"),
             Self::Mkdir { path } => format!("path={path} WRITE mkdir"),

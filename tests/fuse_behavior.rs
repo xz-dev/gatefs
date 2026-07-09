@@ -200,6 +200,25 @@ fn get_xattr(path: &Path, name: &str) -> std::io::Result<Vec<u8>> {
     Ok(value)
 }
 
+fn get_xattr_with_buffer(path: &Path, name: &str) -> std::io::Result<Vec<u8>> {
+    let path = c_string_path(path);
+    let name = c_string(OsStr::new(name));
+    let mut value = vec![0; 1024];
+    let read = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    value.truncate(read as usize);
+    Ok(value)
+}
+
 fn list_xattr(path: &Path) -> std::io::Result<Vec<u8>> {
     let path = c_string_path(path);
     let size = unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
@@ -207,6 +226,17 @@ fn list_xattr(path: &Path) -> std::io::Result<Vec<u8>> {
         return Err(std::io::Error::last_os_error());
     }
     let mut names = vec![0; size as usize];
+    let read = unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if read < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    names.truncate(read as usize);
+    Ok(names)
+}
+
+fn list_xattr_with_buffer(path: &Path) -> std::io::Result<Vec<u8>> {
+    let path = c_string_path(path);
+    let mut names = vec![0; 1024];
     let read = unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
     if read < 0 {
         return Err(std::io::Error::last_os_error());
@@ -367,6 +397,200 @@ fn unprotected_xattr_write_forwards_to_backing_filesystem() {
     assert_eq!(err.raw_os_error(), Some(libc::ENODATA));
 }
 
+fn protected_getxattr_is_gated_by_policy(protection_command: &str, session_name: &str) {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start(session_name);
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    set_xattr(&local.join("file"), "user.gated_read", b"value").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args([protection_command, "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let child = std::thread::spawn({
+        let path = mountpoint.join("data/file");
+        move || get_xattr_with_buffer(&path, "user.gated_read")
+    });
+    let id = wait_for_pending(&session, "GETXATTR name=user.gated_read");
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    assert_eq!(child.join().unwrap().unwrap(), b"value");
+}
+
+#[test]
+#[ignore]
+fn protected_getxattr_is_gated_by_read_policy() {
+    protected_getxattr_is_gated_by_policy("protect-read", "demo_fuse_xattr_read_gate");
+}
+
+#[test]
+#[ignore]
+fn protected_getxattr_is_gated_by_xattr_policy() {
+    protected_getxattr_is_gated_by_policy("protect-xattr", "demo_fuse_xattr_getxattr_gate");
+}
+
+#[test]
+#[ignore]
+fn protected_listxattr_is_gated_by_read_policy() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_list_read_gate");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    set_xattr(&local.join("file"), "user.gated_list", b"value").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-read", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let child = std::thread::spawn({
+        let path = mountpoint.join("data/file");
+        move || list_xattr_with_buffer(&path)
+    });
+    let id = wait_for_pending(&session, "LISTXATTR");
+    session
+        .sandbox_cmd()
+        .args(["allow", &id])
+        .assert()
+        .success();
+    let names = child.join().unwrap().unwrap();
+    assert!(
+        names
+            .windows(b"user.gated_list\0".len())
+            .any(|window| window == b"user.gated_list\0")
+    );
+}
+
+#[test]
+#[ignore]
+fn read_bypass_does_not_release_xattr_protected_getxattr() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_read_bypass_boundary");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    set_xattr(&local.join("file"), "user.xattr_protected", b"value").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-xattr", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["bypass-read", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let child = std::thread::spawn({
+        let path = mountpoint.join("data/file");
+        move || get_xattr_with_buffer(&path, "user.xattr_protected")
+    });
+    let id = wait_for_pending(&session, "GETXATTR name=user.xattr_protected");
+    session.sandbox_cmd().args(["deny", &id]).assert().success();
+    assert_eq!(
+        child.join().unwrap().unwrap_err().raw_os_error(),
+        Some(libc::EACCES)
+    );
+}
+
+#[test]
+#[ignore]
+fn xattr_bypass_releases_read_protected_getxattr() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_read_xattr_bypass");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+    set_xattr(&local.join("file"), "user.allowed_read", b"value").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-read", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["bypass-xattr", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert_eq!(
+        get_xattr_with_buffer(&mountpoint.join("data/file"), "user.allowed_read").unwrap(),
+        b"value"
+    );
+    assert_no_pending(&session);
+}
+
 #[test]
 #[ignore]
 fn attach_xattr_bypass_does_not_follow_symlink_inode() {
@@ -444,10 +668,7 @@ fn protected_xattr_write_is_gated_by_policy(protection_command: &str, session_na
     );
 
     let log = session_log(&session);
-    assert_log_line_contains(
-        &log,
-        &[" pending ", "path=/data/file SETXATTR name=user.gated"],
-    );
+    assert_log_line_contains(&log, &[" pending ", "SETXATTR name=user.gated"]);
     assert_log_line_contains(&log, &["decision", &format!("request={id}"), "ALLOW"]);
 }
 
@@ -461,6 +682,12 @@ fn protected_xattr_write_is_gated_by_xattr_policy() {
 #[ignore]
 fn protected_xattr_write_is_gated_by_metadata_policy() {
     protected_xattr_write_is_gated_by_policy("protect-metadata", "demo_fuse_xattr_metadata_gate");
+}
+
+#[test]
+#[ignore]
+fn protected_xattr_write_is_gated_by_write_policy() {
+    protected_xattr_write_is_gated_by_policy("protect-write", "demo_fuse_xattr_write_gate");
 }
 
 #[test]
@@ -504,6 +731,100 @@ fn metadata_bypass_releases_xattr_protected_xattr() {
         b"value"
     );
     assert_no_pending(&session);
+}
+
+#[test]
+#[ignore]
+fn write_bypass_does_not_release_xattr_protected_xattr() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_write_bypass_boundary");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-xattr", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["bypass-write", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let child = std::thread::spawn({
+        let path = mountpoint.join("data/file");
+        move || set_xattr(&path, "user.xattr_protected", b"value")
+    });
+    let id = wait_for_pending(&session, "SETXATTR name=user.xattr_protected");
+    session.sandbox_cmd().args(["deny", &id]).assert().success();
+    assert_eq!(
+        child.join().unwrap().unwrap_err().raw_os_error(),
+        Some(libc::EPERM)
+    );
+}
+
+#[test]
+#[ignore]
+fn write_bypass_does_not_release_metadata_protected_xattr() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_write_bypass_metadata_boundary");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-metadata", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["bypass-write", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let child = std::thread::spawn({
+        let path = mountpoint.join("data/file");
+        move || set_xattr(&path, "user.metadata_protected", b"value")
+    });
+    let id = wait_for_pending(&session, "SETXATTR name=user.metadata_protected");
+    session.sandbox_cmd().args(["deny", &id]).assert().success();
+    assert_eq!(
+        child.join().unwrap().unwrap_err().raw_os_error(),
+        Some(libc::EPERM)
+    );
 }
 
 #[test]

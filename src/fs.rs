@@ -246,6 +246,53 @@ impl SandboxFs {
         ))
     }
 
+    fn authorize_xattr_read(
+        &self,
+        identity: RequestIdentity,
+        path: SandboxPath,
+        name: Option<String>,
+    ) -> std::result::Result<ReadWriteDecision, Errno> {
+        let target_is_dir = self.path_is_directory(&path)?;
+        if self.path_matches_bypass(ProtectionKind::Xattr, &path, target_is_dir)? {
+            return Ok(ReadWriteDecision::Proceed);
+        }
+        let xattr_protected = {
+            let registry = self.registry.lock().unwrap();
+            let sandbox = registry
+                .sandboxes
+                .get(&self.sandbox_name)
+                .ok_or(Errno::ENOENT)?;
+            sandbox.is_protected(ProtectionKind::Xattr, &path, target_is_dir)
+        };
+        let operation = match (xattr_protected, name) {
+            (true, Some(name)) => ReadWriteOperation::GetXattr { path, name },
+            (true, None) => ReadWriteOperation::ListXattr { path },
+            (false, Some(name)) => ReadWriteOperation::GetXattrRead { path, name },
+            (false, None) => ReadWriteOperation::ListXattrRead { path },
+        };
+        self.authorize_read_write(identity, operation)
+    }
+
+    fn authorize_xattr_write(
+        &self,
+        identity: RequestIdentity,
+        path: SandboxPath,
+        name: &OsStr,
+        remove: bool,
+    ) -> std::result::Result<ReadWriteDecision, Errno> {
+        let target_is_dir = self.path_is_directory(&path)?;
+        if self.path_matches_bypass(ProtectionKind::Xattr, &path, target_is_dir)? {
+            return Ok(ReadWriteDecision::Proceed);
+        }
+        let name = name.to_string_lossy().into_owned();
+        let operation = if remove {
+            ReadWriteOperation::RemoveXattr { path, name }
+        } else {
+            ReadWriteOperation::SetXattr { path, name }
+        };
+        self.authorize_read_write(identity, operation)
+    }
+
     fn is_trusted_operation(
         registry: &SandboxRegistry,
         sandbox_name: &str,
@@ -1213,6 +1260,26 @@ impl Filesystem for SandboxFs {
             reply.error(Errno::ENOENT);
             return;
         };
+        match self.authorize_xattr_write(
+            RequestIdentity::from_request(req),
+            path.clone(),
+            name,
+            false,
+        ) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        }
         let operation = MetadataOperation::SetXattr {
             path: path.clone(),
             name: name.to_string_lossy().into_owned(),
@@ -1264,11 +1331,30 @@ impl Filesystem for SandboxFs {
             Err(err) => reply.error(err),
         }
     }
-    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        let Some(local_path) = self.local_path_for_ino(ino) else {
+    fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let Some((path, local_path)) = self.path_and_local_path_for_ino(ino) else {
             reply.error(Errno::ENOENT);
             return;
         };
+        match self.authorize_xattr_read(
+            RequestIdentity::from_request(req),
+            path,
+            Some(name.to_string_lossy().into_owned()),
+        ) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        }
         match hostfs::getxattr(&local_path, name) {
             Ok(value) if size == 0 => reply.size(value.len() as u32),
             Ok(value) if value.len() <= size as usize => reply.data(&value),
@@ -1277,11 +1363,26 @@ impl Filesystem for SandboxFs {
         }
     }
 
-    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let Some(local_path) = self.local_path_for_ino(ino) else {
+    fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let Some((path, local_path)) = self.path_and_local_path_for_ino(ino) else {
             reply.error(Errno::ENOENT);
             return;
         };
+        match self.authorize_xattr_read(RequestIdentity::from_request(req), path, None) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        }
         match hostfs::listxattr(&local_path) {
             Ok(names) if size == 0 => reply.size(names.len() as u32),
             Ok(names) if names.len() <= size as usize => reply.data(&names),
@@ -1295,6 +1396,26 @@ impl Filesystem for SandboxFs {
             reply.error(Errno::ENOENT);
             return;
         };
+        match self.authorize_xattr_write(
+            RequestIdentity::from_request(req),
+            path.clone(),
+            name,
+            true,
+        ) {
+            Ok(ReadWriteDecision::Proceed) => {}
+            Ok(ReadWriteDecision::Denied) => {
+                reply.error(Errno::EACCES);
+                return;
+            }
+            Ok(ReadWriteDecision::Canceled) => {
+                reply.error(Errno::ECANCELED);
+                return;
+            }
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        }
         let operation = MetadataOperation::RemoveXattr {
             path: path.clone(),
             name: name.to_string_lossy().into_owned(),
