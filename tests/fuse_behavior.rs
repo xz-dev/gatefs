@@ -465,6 +465,49 @@ fn protected_xattr_write_is_gated_by_metadata_policy() {
 
 #[test]
 #[ignore]
+fn metadata_bypass_releases_xattr_protected_xattr() {
+    require_fuse();
+    if !fuse_enabled() {
+        return;
+    }
+    let session = RunningSession::start("demo_fuse_xattr_metadata_bypass");
+    let local = session.temp.path().join("local");
+    let mountpoint = session.temp.path().join("mnt");
+    fs::create_dir_all(&local).unwrap();
+    fs::create_dir_all(&mountpoint).unwrap();
+    fs::write(local.join("file"), "hello").unwrap();
+
+    session
+        .sandbox_cmd()
+        .args(["mount", local.to_str().unwrap(), "/data"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["protect-xattr", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["bypass-metadata", "/data/**"])
+        .assert()
+        .success();
+    session
+        .sandbox_cmd()
+        .args(["attach", mountpoint.to_str().unwrap()])
+        .assert()
+        .success();
+
+    set_xattr(&mountpoint.join("data/file"), "user.allowed", b"value").unwrap();
+    assert_eq!(
+        get_xattr(&local.join("file"), "user.allowed").unwrap(),
+        b"value"
+    );
+    assert_no_pending(&session);
+}
+
+#[test]
+#[ignore]
 fn xattr_bypass_releases_metadata_protected_xattr_but_not_chmod() {
     require_fuse();
     if !fuse_enabled() {
